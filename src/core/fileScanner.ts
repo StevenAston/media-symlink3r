@@ -153,9 +153,6 @@ export function queryEverythingSdk(
     const koffi = require('koffi');
     const lib = koffi.load(dllPath);
 
-    const Everything_SetInstanceNameW = lib.func(
-      'void __stdcall Everything_SetInstanceNameW(str16)',
-    );
     const Everything_SetSearchW = lib.func('void __stdcall Everything_SetSearchW(str16)');
     const Everything_SetRequestFlags = lib.func(
       'void __stdcall Everything_SetRequestFlags(uint32)',
@@ -197,19 +194,10 @@ export function queryEverythingSdk(
       }
     }
 
-    Everything_SetInstanceNameW('');
     Everything_SetRequestFlags(flags);
     Everything_SetSearchW(searchQuery);
 
-    let ok: boolean = Everything_QueryW(true);
-    if (!ok && Everything_GetLastError() === 2) {
-      // Try Everything 1.5a named instance
-      Everything_SetInstanceNameW('1.5a');
-      Everything_SetRequestFlags(flags);
-      Everything_SetSearchW(searchQuery);
-      ok = Everything_QueryW(true);
-    }
-
+    const ok: boolean = Everything_QueryW(true);
     if (!ok) {
       const errCode = Everything_GetLastError();
       logger.warn(
