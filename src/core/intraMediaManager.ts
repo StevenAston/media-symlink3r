@@ -37,7 +37,7 @@ export function findIntraMediaDuplicates(config: AppConfig): IntraMediaDuplicate
   return withDatabase(config.dbFilePath, (db) => {
     const groups = db
       .prepare(
-        `SELECT xxh128_hash AS xxh128Hash,
+        `SELECT COALESCE(xxh128_hash, sparse_hash) AS xxh128Hash,
                 file_size AS fileSize,
                 COUNT(*) AS copyCount,
                 (COUNT(*) - 1) * file_size AS wastedBytes,
@@ -46,8 +46,8 @@ export function findIntraMediaDuplicates(config: AppConfig): IntraMediaDuplicate
          WHERE scan_source = 'media'
            AND is_symlink = 0
            AND file_size > 0
-           AND xxh128_hash IS NOT NULL
-         GROUP BY xxh128_hash, file_size
+           AND COALESCE(xxh128_hash, sparse_hash) IS NOT NULL
+         GROUP BY COALESCE(xxh128_hash, sparse_hash), file_size
          HAVING COUNT(*) > 1
          ORDER BY wastedBytes DESC`,
       )
@@ -71,7 +71,7 @@ export function findIntraMediaDuplicates(config: AppConfig): IntraMediaDuplicate
       FROM files
       WHERE scan_source = 'media'
         AND is_symlink = 0
-        AND xxh128_hash = ?
+        AND COALESCE(xxh128_hash, sparse_hash) = ?
         AND file_size = ?
       ORDER BY id ASC
     `);

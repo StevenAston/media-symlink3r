@@ -139,6 +139,13 @@ export function initializeDatabase(dbFilePath: string): void {
       CREATE INDEX IF NOT EXISTS idx_files_status_source ON files (scan_source, status, is_symlink);
       CREATE INDEX IF NOT EXISTS idx_torrent_files_filepath ON torrent_files (filepath_in_torrent);
       CREATE INDEX IF NOT EXISTS idx_torrent_files_virtual_path ON torrent_files (virtual_path);
+
+      -- Self-heal any non-zero-byte files erroneously marked is_symlink=1 by Everything INVALID_FILE_ATTRIBUTES (0xFFFFFFFF)
+      UPDATE files
+      SET is_symlink = 0,
+          symlink_target = NULL,
+          status = CASE WHEN xxh128_hash IS NOT NULL THEN 'hashed' ELSE 'new' END
+      WHERE file_size > 0 AND is_symlink = 1;
     `);
   });
 }

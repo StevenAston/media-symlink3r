@@ -63,6 +63,7 @@ const EVERYTHING_REQUEST_SIZE = 0x00000010;
 const EVERYTHING_REQUEST_DATE_MODIFIED = 0x00000080;
 const EVERYTHING_REQUEST_ATTRIBUTES = 0x00000400;
 const FILE_ATTRIBUTE_REPARSE_POINT = 0x0400;
+const INVALID_FILE_ATTRIBUTES = 0xffffffff;
 const WINDOWS_TICK = 10000000n;
 const SEC_TO_UNIX_EPOCH = 116444736000000000n;
 
@@ -82,14 +83,18 @@ export function inspectSymlinkState(
   virtualPathOrPoolRoot?: string | null,
   attrHint?: number,
 ): { isSymlink: boolean; target: string | null; symlinkTarget: string | null } {
-  // Fast path when Everything SDK already reported FILE_ATTRIBUTE_REPARSE_POINT
-  if (attrHint !== undefined && (attrHint & FILE_ATTRIBUTE_REPARSE_POINT) !== 0) {
+  // Fast path when Everything SDK explicitly reported a valid FILE_ATTRIBUTE_REPARSE_POINT
+  if (
+    attrHint !== undefined &&
+    attrHint !== INVALID_FILE_ATTRIBUTES &&
+    (attrHint & FILE_ATTRIBUTE_REPARSE_POINT) !== 0
+  ) {
     try {
       const raw = fs.readlinkSync(fullPath);
       const target = resolveReadlinkTarget(fullPath, raw);
       return { isSymlink: true, target, symlinkTarget: target };
     } catch {
-      return { isSymlink: true, target: null, symlinkTarget: null };
+      // Fall through to lstatSync verification if readlinkSync failed
     }
   }
 
@@ -228,12 +233,17 @@ export function queryEverythingSdk(
       const unixTimestamp =
         ft > SEC_TO_UNIX_EPOCH ? Number((ft - SEC_TO_UNIX_EPOCH) / WINDOWS_TICK) : 0;
 
-      const isReparseAttr = (attrs & FILE_ATTRIBUTE_REPARSE_POINT) !== 0;
-      let isSymlink = isReparseAttr;
+      const hasValidAttrs = attrs !== INVALID_FILE_ATTRIBUTES && attrs !== 0;
+      const isReparseAttr = hasValidAttrs && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) !== 0;
+      let isSymlink = false;
       let symlinkTarget: string | null = null;
 
       if (isReparseAttr || fileSize === 0) {
-        const inspected = inspectSymlinkState(fullPath, virtualPoolRoot, attrs);
+        const inspected = inspectSymlinkState(
+          fullPath,
+          virtualPoolRoot,
+          hasValidAttrs ? attrs : undefined,
+        );
         isSymlink = inspected.isSymlink;
         symlinkTarget = inspected.target;
       }
@@ -461,9 +471,14 @@ export function scanDirectory(
           file_size = excluded.file_size,
           modified_date = excluded.modified_date,
           is_symlink = excluded.is_symlink,
-          symlink_target = COALESCE(excluded.symlink_target, files.symlink_target),
+          symlink_target = CASE
+            WHEN excluded.is_symlink = 1 THEN COALESCE(excluded.symlink_target, files.symlink_target)
+            ELSE NULL
+          END,
           status = CASE
-            WHEN excluded.is_symlink = 1 OR files.status = 'symlinked' THEN 'symlinked'
+            WHEN excluded.is_symlink = 1 THEN 'symlinked'
+            WHEN files.is_symlink = 1 AND excluded.is_symlink = 0 THEN
+              CASE WHEN files.xxh128_hash IS NOT NULL THEN 'hashed' ELSE 'new' END
             WHEN files.file_size != excluded.file_size OR ABS(files.modified_date - excluded.modified_date) > 0.001 THEN 'new'
             ELSE files.status
           END,

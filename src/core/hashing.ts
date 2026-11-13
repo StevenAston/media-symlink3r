@@ -589,7 +589,7 @@ export async function hashUnHashedFilesPerDrive(
              FROM files
              WHERE is_symlink = 0 AND file_size > 0
              GROUP BY file_size
-             HAVING COUNT(*) > 1
+             HAVING COUNT(DISTINCT scan_source) > 1 OR (file_size >= 10485760 AND COUNT(*) > 1)
            )
          ORDER BY file_size DESC`,
       )
@@ -646,6 +646,7 @@ export async function hashUnHashedFilesPerDrive(
          ) c ON f.file_size = c.file_size AND f.sparse_hash = c.sparse_hash
          WHERE f.is_symlink = 0
            AND f.xxh128_hash IS NULL
+           AND f.file_size <= 67108864
            AND f.status NOT LIKE 'error%'
          ORDER BY f.file_size DESC`,
       )
