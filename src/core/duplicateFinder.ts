@@ -1,6 +1,6 @@
 import { AppConfig } from './config';
 import { withDatabase } from './database';
-import { hashSpecificFiles } from './hashing';
+import { hashSpecificFiles, hashUnHashedFilesPerDrive } from './hashing';
 import { physicalToVirtualPath } from './utils';
 
 export interface PendingDuplicatePair {
@@ -105,8 +105,36 @@ export async function identifyAndLinkDuplicates(
     });
   }
 
-  // Find any cross-source candidate pairs sharing file_size where neither full nor sparse hash exists yet
-  // (or quick_hash-only collisions <= 64 MiB)
+  // Ensure any unhashed cross-source candidate pairs sharing file_size are sparse-hashed first
+  const unhashedCrossSourceCount = withDatabase(config.dbFilePath, (db) => {
+    const row = db
+      .prepare(
+        `SELECT COUNT(DISTINCT f.id) AS cnt
+         FROM files f
+         JOIN files other
+           ON f.file_size = other.file_size
+          AND f.id != other.id
+          AND f.scan_source != other.scan_source
+         WHERE f.is_symlink = 0
+           AND other.is_symlink = 0
+           AND f.file_size > 0
+           AND f.xxh128_hash IS NULL
+           AND f.sparse_hash IS NULL`,
+      )
+      .get() as { cnt: number } | undefined;
+    return Number(row?.cnt ?? 0);
+  });
+
+  let onDemandHashed = 0;
+  if (unhashedCrossSourceCount > 0 && !options.signal?.aborted) {
+    const smartRes = await hashUnHashedFilesPerDrive(config, {
+      strategy: 'smart_candidates',
+      signal: options.signal,
+    });
+    onDemandHashed += smartRes.totalFilesHashed;
+  }
+
+  // Also resolve any legacy quick_hash-only collisions <= 64 MiB
   const candidateIdsToFullHash = withDatabase(config.dbFilePath, (db) => {
     const rows = db
       .prepare(
@@ -131,9 +159,8 @@ export async function identifyAndLinkDuplicates(
     return rows.map((r) => r.id);
   });
 
-  let onDemandHashed = 0;
   if (candidateIdsToFullHash.length > 0 && !options.signal?.aborted) {
-    onDemandHashed = await hashSpecificFiles(
+    onDemandHashed += await hashSpecificFiles(
       config,
       candidateIdsToFullHash,
       undefined,

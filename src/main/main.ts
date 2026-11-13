@@ -169,6 +169,11 @@ function registerIpcHandlers(): void {
           'Hashing',
           `Hashing complete: ${res.totalFilesHashed.toLocaleString()} files hashed (${res.candidateCollisionsHashed.toLocaleString()} full collision hashes).`,
         );
+        const dupRes = await identifyAndLinkDuplicates(currentConfig);
+        logger.success(
+          'Duplicates',
+          `Auto-linked ${dupRes.duplicatesLinked.toLocaleString()} duplicates after hashing.`,
+        );
         return res;
       } finally {
         activeHashAbortController = null;
