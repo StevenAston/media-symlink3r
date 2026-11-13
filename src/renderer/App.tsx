@@ -113,6 +113,9 @@ export function App() {
   // Workbench state
   const [pendingPairs, setPendingPairs] = useState<PendingDuplicatePair[]>([]);
   const [selectedPairIds, setSelectedPairIds] = useState<Set<number>>(new Set());
+  const [workbenchPage, setWorkbenchPage] = useState<number>(1);
+  const [workbenchPageSize, setWorkbenchPageSize] = useState<number>(50);
+  const [workbenchSearch, setWorkbenchSearch] = useState<string>('');
 
   // Priority #1: Broken Symlink Healer state
   const [brokenSymlinks, setBrokenSymlinks] = useState<BrokenSymlinkReportItem[]>([]);
@@ -463,97 +466,264 @@ export function App() {
           </>
         )}
 
-        {activeTab === 'workbench' && (
-          <div className="card">
-            <div className="header-bar">
-              <h3>
-                Dry-Run Symlink Workbench ({pendingPairs.length} Ready —{' '}
-                {formatBytes(pendingPairs.reduce((s, p) => s + p.fileSize, 0))} Reclaimable)
-              </h3>
-              <div className="btn-row">
-                <button
-                  className="btn success"
-                  disabled={selectedPairIds.size === 0 || !!busyMessage}
-                  onClick={() =>
-                    void runAction('Creating symlinks & verifying torrents...', async () => {
-                      const res = (await window.mediaLinker?.processDuplicates({
-                        fileIds: Array.from(selectedPairIds),
-                        targetMode: config?.symlinkTargetMode ?? 'virtual',
-                      })) as { succeeded?: number; bytesReclaimed?: number };
-                      setStatusBanner(
-                        `Created ${res?.succeeded ?? 0} symlinks (${formatBytes(res?.bytesReclaimed ?? 0)} reclaimed).`,
-                      );
-                      const updated = (await window.mediaLinker?.getPendingDuplicates()) ?? [];
-                      setPendingPairs(updated);
-                      setSelectedPairIds(new Set(updated.map((p) => p.downloadFileId)));
-                    })
-                  }
-                >
-                  Execute Selected ({selectedPairIds.size})
-                </button>
-              </div>
-            </div>
+        {activeTab === 'workbench' && (() => {
+          const query = workbenchSearch.trim().toLowerCase();
+          const filteredPairs = query
+            ? pendingPairs.filter(
+                (p) =>
+                  p.downloadFullPath.toLowerCase().includes(query) ||
+                  p.mediaFullPath.toLowerCase().includes(query) ||
+                  (p.torrentName && p.torrentName.toLowerCase().includes(query)),
+              )
+            : pendingPairs;
+          const totalPages = Math.max(1, Math.ceil(filteredPairs.length / workbenchPageSize));
+          const safePage = Math.min(Math.max(1, workbenchPage), totalPages);
+          const startIdx = (safePage - 1) * workbenchPageSize;
+          const pagePairs = filteredPairs.slice(startIdx, startIdx + workbenchPageSize);
+          const allPageSelected =
+            pagePairs.length > 0 && pagePairs.every((p) => selectedPairIds.has(p.downloadFileId));
+          const selectedBytes = pendingPairs.reduce(
+            (sum, p) => (selectedPairIds.has(p.downloadFileId) ? sum + p.fileSize : sum),
+            0,
+          );
 
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>
-                    <input
-                      type="checkbox"
-                      checked={
-                        pendingPairs.length > 0 &&
-                        selectedPairIds.size === pendingPairs.length
-                      }
+          return (
+            <div className="card">
+              <div className="header-bar">
+                <h3 id="workbench-table-heading">
+                  Dry-Run Symlink Workbench ({pendingPairs.length.toLocaleString()} Ready —{' '}
+                  {formatBytes(pendingPairs.reduce((s, p) => s + p.fileSize, 0))} Reclaimable)
+                </h3>
+                <div className="btn-row">
+                  <button
+                    className="btn"
+                    disabled={filteredPairs.length === 0 || !!busyMessage}
+                    onClick={() => {
+                      const next = new Set(selectedPairIds);
+                      for (const p of filteredPairs) next.add(p.downloadFileId);
+                      setSelectedPairIds(next);
+                    }}
+                  >
+                    Select All ({filteredPairs.length.toLocaleString()})
+                  </button>
+                  <button
+                    className="btn"
+                    disabled={selectedPairIds.size === 0 || !!busyMessage}
+                    onClick={() => setSelectedPairIds(new Set())}
+                  >
+                    Clear Selection
+                  </button>
+                  <button
+                    className="btn success"
+                    disabled={selectedPairIds.size === 0 || !!busyMessage}
+                    onClick={() =>
+                      void runAction('Creating symlinks & verifying torrents...', async () => {
+                        const res = (await window.mediaLinker?.processDuplicates({
+                          fileIds: Array.from(selectedPairIds),
+                          targetMode: config?.symlinkTargetMode ?? 'virtual',
+                        })) as { succeeded?: number; bytesReclaimed?: number };
+                        setStatusBanner(
+                          `Created ${res?.succeeded ?? 0} symlinks (${formatBytes(res?.bytesReclaimed ?? 0)} reclaimed).`,
+                        );
+                        const updated = (await window.mediaLinker?.getPendingDuplicates()) ?? [];
+                        setPendingPairs(updated);
+                        setSelectedPairIds(new Set(updated.map((p) => p.downloadFileId)));
+                      })
+                    }
+                  >
+                    Execute Selected ({selectedPairIds.size.toLocaleString()} —{' '}
+                    {formatBytes(selectedBytes)})
+                  </button>
+                </div>
+              </div>
+
+              <div className="pagination-bar">
+                <div className="pagination-left">
+                  <input
+                    type="search"
+                    className="input-box"
+                    style={{ width: 280 }}
+                    placeholder="Filter by file path or torrent..."
+                    value={workbenchSearch}
+                    onChange={(e) => {
+                      setWorkbenchSearch(e.target.value);
+                      setWorkbenchPage(1);
+                    }}
+                  />
+                  <span className="pagination-info">
+                    Showing{' '}
+                    {filteredPairs.length === 0
+                      ? '0'
+                      : `${(startIdx + 1).toLocaleString()}–${Math.min(
+                          startIdx + workbenchPageSize,
+                          filteredPairs.length,
+                        ).toLocaleString()}`}{' '}
+                    of {filteredPairs.length.toLocaleString()} pairs
+                  </span>
+                </div>
+
+                <div className="pagination-controls">
+                  <label className="pagination-info">
+                    Rows:
+                    <select
+                      className="input-box"
+                      style={{ width: 80, marginLeft: 6 }}
+                      value={workbenchPageSize}
                       onChange={(e) => {
-                        if (e.target.checked) {
-                          setSelectedPairIds(new Set(pendingPairs.map((p) => p.downloadFileId)));
-                        } else {
-                          setSelectedPairIds(new Set());
-                        }
+                        setWorkbenchPageSize(Number(e.target.value));
+                        setWorkbenchPage(1);
                       }}
-                    />
-                  </th>
-                  <th>Download File</th>
-                  <th>Proposed Target ({config?.symlinkTargetMode ?? 'virtual'})</th>
-                  <th>Size</th>
-                  <th>Torrent</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pendingPairs.map((p) => (
-                  <tr key={p.downloadFileId}>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={selectedPairIds.has(p.downloadFileId)}
-                        onChange={(e) => {
-                          const next = new Set(selectedPairIds);
-                          if (e.target.checked) next.add(p.downloadFileId);
-                          else next.delete(p.downloadFileId);
-                          setSelectedPairIds(next);
-                        }}
-                      />
-                    </td>
-                    <td className="mono">{p.downloadFullPath}</td>
-                    <td className="mono">
-                      {config?.symlinkTargetMode === 'physical'
-                        ? p.proposedTargetPhysical
-                        : p.proposedTargetVirtual}
-                    </td>
-                    <td>{formatBytes(p.fileSize)}</td>
-                    <td>
-                      {p.torrentName ? (
-                        <span className="badge emerald">{p.torrentName}</span>
-                      ) : (
-                        <span className="badge amber">Untracked</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                    >
+                      <option value={25}>25</option>
+                      <option value={50}>50</option>
+                      <option value={100}>100</option>
+                      <option value={250}>250</option>
+                    </select>
+                  </label>
+                  <button
+                    className="btn"
+                    disabled={safePage <= 1}
+                    onClick={() => setWorkbenchPage(1)}
+                  >
+                    « First
+                  </button>
+                  <button
+                    className="btn"
+                    disabled={safePage <= 1}
+                    onClick={() => setWorkbenchPage((p) => Math.max(1, p - 1))}
+                  >
+                    ‹ Prev
+                  </button>
+                  <span className="pagination-info">
+                    Page <strong>{safePage}</strong> of <strong>{totalPages}</strong>
+                  </span>
+                  <button
+                    className="btn"
+                    disabled={safePage >= totalPages}
+                    onClick={() => setWorkbenchPage((p) => Math.min(totalPages, p + 1))}
+                  >
+                    Next ›
+                  </button>
+                  <button
+                    className="btn"
+                    disabled={safePage >= totalPages}
+                    onClick={() => setWorkbenchPage(totalPages)}
+                  >
+                    Last »
+                  </button>
+                </div>
+              </div>
+
+              <div
+                tabIndex={0}
+                role="region"
+                aria-labelledby="workbench-table-heading"
+                className="table-wrapper"
+              >
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>
+                        <input
+                          type="checkbox"
+                          title="Select/deselect current page"
+                          checked={allPageSelected}
+                          onChange={(e) => {
+                            const next = new Set(selectedPairIds);
+                            if (e.target.checked) {
+                              for (const p of pagePairs) next.add(p.downloadFileId);
+                            } else {
+                              for (const p of pagePairs) next.delete(p.downloadFileId);
+                            }
+                            setSelectedPairIds(next);
+                          }}
+                        />
+                      </th>
+                      <th>Download File</th>
+                      <th>Proposed Target ({config?.symlinkTargetMode ?? 'virtual'})</th>
+                      <th>Size</th>
+                      <th>Torrent</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pagePairs.map((p) => (
+                      <tr key={p.downloadFileId}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selectedPairIds.has(p.downloadFileId)}
+                            onChange={(e) => {
+                              const next = new Set(selectedPairIds);
+                              if (e.target.checked) next.add(p.downloadFileId);
+                              else next.delete(p.downloadFileId);
+                              setSelectedPairIds(next);
+                            }}
+                          />
+                        </td>
+                        <td className="mono">{p.downloadFullPath}</td>
+                        <td className="mono">
+                          {config?.symlinkTargetMode === 'physical'
+                            ? p.proposedTargetPhysical
+                            : p.proposedTargetVirtual}
+                        </td>
+                        <td style={{ whiteSpace: 'nowrap' }}>{formatBytes(p.fileSize)}</td>
+                        <td>
+                          {p.torrentName ? (
+                            <span className="badge emerald">{p.torrentName}</span>
+                          ) : (
+                            <span className="badge amber">Untracked</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {totalPages > 1 && (
+                <div className="pagination-bar" style={{ marginTop: 12, marginBottom: 0 }}>
+                  <span className="pagination-info">
+                    Selected: <strong>{selectedPairIds.size.toLocaleString()}</strong> files (
+                    {formatBytes(selectedBytes)})
+                  </span>
+                  <div className="pagination-controls">
+                    <button
+                      className="btn"
+                      disabled={safePage <= 1}
+                      onClick={() => setWorkbenchPage(1)}
+                    >
+                      « First
+                    </button>
+                    <button
+                      className="btn"
+                      disabled={safePage <= 1}
+                      onClick={() => setWorkbenchPage((p) => Math.max(1, p - 1))}
+                    >
+                      ‹ Prev
+                    </button>
+                    <span className="pagination-info">
+                      Page <strong>{safePage}</strong> of <strong>{totalPages}</strong>
+                    </span>
+                    <button
+                      className="btn"
+                      disabled={safePage >= totalPages}
+                      onClick={() => setWorkbenchPage((p) => Math.min(totalPages, p + 1))}
+                    >
+                      Next ›
+                    </button>
+                    <button
+                      className="btn"
+                      disabled={safePage >= totalPages}
+                      onClick={() => setWorkbenchPage(totalPages)}
+                    >
+                      Last »
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {activeTab === 'healer' && (
           <div className="card">
