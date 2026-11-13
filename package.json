@@ -2,7 +2,7 @@
   "name": "media-symlink3r",
   "version": "3.0.0",
   "description": "High-performance DrivePool & qBittorrent media deduplication, symlink healer, and disaster recovery catalog (Electron + TypeScript)",
-  "main": "dist-electron/main.js",
+  "main": "dist-electron/main/main.js",
   "scripts": {
     "dev": "vite",
     "build:renderer": "vite build",
@@ -25,9 +25,13 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^35.0.0",
+    "electron": "^45.3.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
-    "vitest": "^2.1.8"
+    "vitest": "^5.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "koffi@2.16.3": true
   }
 }

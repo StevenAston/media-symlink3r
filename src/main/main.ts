@@ -61,6 +61,13 @@ function createWindow(): void {
   } else {
     void mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
   }
+
+  if (process.env.ELECTRON_SMOKE_TEST === '1') {
+    mainWindow.webContents.once('did-finish-load', () => {
+      console.log('ELECTRON_SMOKE_TEST: Renderer loaded successfully');
+      setTimeout(() => app.quit(), 200);
+    });
+  }
 }
 
 function registerIpcHandlers(): void {
