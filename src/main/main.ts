@@ -28,6 +28,8 @@ import {
 let mainWindow: BrowserWindow | null = null;
 let currentConfig: AppConfig = createDefaultConfig(process.cwd());
 let activeHashAbortController: AbortController | null = null;
+let isHashPaused = false;
+let hashResumeResolvers: Array<() => void> = [];
 
 function runInWorker<T>(action: string, ...args: unknown[]): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -156,11 +158,22 @@ function registerIpcHandlers(): void {
       const strategy = options?.strategy ?? currentConfig.hashStrategy;
       logger.info('Hashing', `Starting per-drive hashing (strategy=${strategy})...`);
       activeHashAbortController = new AbortController();
+      isHashPaused = false;
+      hashResumeResolvers = [];
       try {
         const res = await hashUnHashedFilesPerDrive(currentConfig, {
           strategy,
           driveFilter: options?.driveFilter,
           signal: activeHashAbortController.signal,
+          isPaused: () => isHashPaused,
+          waitIfPaused: () =>
+            new Promise<void>((resolve) => {
+              if (!isHashPaused) {
+                resolve();
+              } else {
+                hashResumeResolvers.push(resolve);
+              }
+            }),
           onProgress: (progress) => {
             mainWindow?.webContents.send('hash:progress', progress);
           },
@@ -177,14 +190,39 @@ function registerIpcHandlers(): void {
         return res;
       } finally {
         activeHashAbortController = null;
+        isHashPaused = false;
+        const resolvers = hashResumeResolvers;
+        hashResumeResolvers = [];
+        for (const r of resolvers) r();
       }
     },
   );
 
+  ipcMain.handle('pipeline:pause-hash', () => {
+    if (!activeHashAbortController) return false;
+    isHashPaused = true;
+    logger.warn('Hashing', 'Hashing paused by user.');
+    return true;
+  });
+
+  ipcMain.handle('pipeline:resume-hash', () => {
+    if (!activeHashAbortController) return false;
+    isHashPaused = false;
+    const resolvers = hashResumeResolvers;
+    hashResumeResolvers = [];
+    for (const r of resolvers) r();
+    logger.info('Hashing', 'Hashing resumed by user.');
+    return true;
+  });
+
   ipcMain.handle('pipeline:cancel-hash', () => {
     if (activeHashAbortController) {
       logger.warn('Hashing', 'User requested hashing cancellation...');
+      isHashPaused = false;
       activeHashAbortController.abort();
+      const resolvers = hashResumeResolvers;
+      hashResumeResolvers = [];
+      for (const r of resolvers) r();
       return true;
     }
     return false;

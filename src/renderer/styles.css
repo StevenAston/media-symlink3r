@@ -29,7 +29,7 @@ body {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 250px 1fr;
+  grid-template-columns: 260px 1fr 280px;
   min-height: 100vh;
 }
 
@@ -49,9 +49,9 @@ body {
 }
 
 .brand h1 {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--accent-blue);
+  font-size: 22px;
+  font-weight: 300;
+  color: #ffffff;
   letter-spacing: -0.01em;
 }
 
@@ -71,11 +71,52 @@ body {
   border-radius: 8px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 15.5px;
   font-weight: 500;
   cursor: pointer;
   text-align: left;
   transition: all 0.15s ease;
+}
+
+.nav-item-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.p-circle {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.p-circle.emerald {
+  background: rgba(52, 211, 153, 0.16);
+  color: var(--accent-emerald);
+}
+
+.p-circle.amber {
+  background: rgba(251, 191, 36, 0.16);
+  color: var(--accent-amber);
+}
+
+.p-circle.rose {
+  background: rgba(251, 113, 133, 0.16);
+  color: var(--accent-rose);
+}
+
+.p-circle.blue {
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--accent-blue);
 }
 
 .nav-btn:hover {
@@ -232,6 +273,36 @@ body {
   gap: 12px;
 }
 
+.drives-panel {
+  background: var(--bg-card);
+  border-left: 1px solid var(--border-subtle);
+  padding: 20px 14px;
+  overflow-y: auto;
+  max-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.drives-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 4px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.drives-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .drive-card {
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
@@ -245,6 +316,14 @@ body {
   align-items: center;
   margin-bottom: 6px;
   font-weight: 600;
+}
+
+.drive-letter {
+  font-size: 20px;
+  font-weight: 300;
+  color: var(--text-primary);
+  line-height: 1;
+  letter-spacing: -0.01em;
 }
 
 .progress-track {

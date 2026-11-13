@@ -195,4 +195,58 @@ describe('hashing.ts', () => {
     const countCompleted = await hashSpecificFiles(config, [1]);
     expect(countCompleted).toBe(1);
   });
+
+  it('supports in-place pause and resume while preserving exact xxh128 hashes', async () => {
+    const payload = Buffer.alloc(600 * 1024, 'P');
+    const f1 = path.join(poolPartD, 'Media', 'PauseMovie.mkv');
+    fs.writeFileSync(f1, payload);
+    runFileScan(config, { useEverythingSdk: false });
+
+    const expected = await computeStreamXxh128(f1);
+
+    let paused = true;
+    let resumeFn: (() => void) | null = null;
+    let enteredWait = false;
+    const seenPausedStates: boolean[] = [];
+
+    const hashPromise = hashUnHashedFilesPerDrive(config, {
+      strategy: 'full_library',
+      isPaused: () => paused,
+      waitIfPaused: () =>
+        new Promise<void>((resolve) => {
+          if (!paused) {
+            resolve();
+            return;
+          }
+          enteredWait = true;
+          resumeFn = () => {
+            paused = false;
+            resolve();
+          };
+        }),
+      onProgress: (prog) => {
+        seenPausedStates.push(Boolean(prog.paused));
+      },
+    });
+
+    // Wait briefly until waitIfPaused is entered while paused
+    for (let i = 0; i < 20 && !enteredWait; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(enteredWait).toBe(true);
+    expect(seenPausedStates).toContain(true);
+
+    // Resume and wait for completion
+    resumeFn!();
+    const res = await hashPromise;
+    expect(res.totalFilesHashed).toBe(1);
+
+    withDatabase(config.dbFilePath, (db) => {
+      const row = db
+        .prepare('SELECT status, xxh128_hash FROM files WHERE filename = ?')
+        .get('PauseMovie.mkv') as { status: string; xxh128_hash: string };
+      expect(row.status).toBe('hashed');
+      expect(row.xxh128_hash).toBe(expected.hash);
+    });
+  });
 });

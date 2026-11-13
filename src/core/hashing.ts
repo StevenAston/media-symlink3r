@@ -40,9 +40,15 @@ export interface DriveHashProgress {
   phase: 'sparse' | 'full' | 'done';
 }
 
+export interface HashPauseControl {
+  isPaused?: () => boolean;
+  waitIfPaused?: () => Promise<void>;
+}
+
 export interface MultiDriveHashProgress {
   strategy: HashStrategy;
   phase: 'sparse_candidates' | 'full_candidates' | 'full_library' | 'completed';
+  paused?: boolean;
   drives: Record<string, DriveHashProgress>;
   totalFiles: number;
   completedFiles: number;
@@ -75,6 +81,7 @@ export async function computeStreamXxh128(
   fullPath: string,
   maxBytesToRead?: number,
   signal?: AbortSignal,
+  pauseControl?: HashPauseControl,
 ): Promise<{ hash: string; bytesRead: number }> {
   const hasher = await createXXHash128();
   hasher.init();
@@ -86,6 +93,12 @@ export async function computeStreamXxh128(
     while (true) {
       if (signal?.aborted) {
         throw new Error('Hashing aborted');
+      }
+      if (pauseControl?.isPaused?.() && pauseControl.waitIfPaused) {
+        await pauseControl.waitIfPaused();
+        if (signal?.aborted) {
+          throw new Error('Hashing aborted');
+        }
       }
       const remaining =
         maxBytesToRead !== undefined ? maxBytesToRead - bytesReadTotal : STREAM_BUFFER_SIZE;
@@ -117,9 +130,15 @@ export async function computeSparseHash(
   fileSize: number,
   sampleSizeBytes: number = 1024 * 1024,
   signal?: AbortSignal,
+  pauseControl?: HashPauseControl,
 ): Promise<{ sparseHash: string; fullHash?: string; bytesRead: number }> {
   if (fileSize <= sampleSizeBytes * 3) {
-    const { hash, bytesRead } = await computeStreamXxh128(fullPath, undefined, signal);
+    const { hash, bytesRead } = await computeStreamXxh128(
+      fullPath,
+      undefined,
+      signal,
+      pauseControl,
+    );
     return {
       sparseHash: hash,
       fullHash: hash,
@@ -149,6 +168,12 @@ export async function computeSparseHash(
       if (signal?.aborted) {
         throw new Error('Hashing aborted');
       }
+      if (pauseControl?.isPaused?.() && pauseControl.waitIfPaused) {
+        await pauseControl.waitIfPaused();
+        if (signal?.aborted) {
+          throw new Error('Hashing aborted');
+        }
+      }
       let sliceRead = 0;
       while (sliceRead < sampleSizeBytes) {
         const { bytesRead } = await fd.read(
@@ -176,6 +201,7 @@ export async function computeSparseHash(
 export async function hashFileWorker(
   task: HashTask,
   signal?: AbortSignal,
+  pauseControl?: HashPauseControl,
 ): Promise<HashResult> {
   const start = performance.now();
   try {
@@ -186,6 +212,7 @@ export async function hashFileWorker(
         task.file_size,
         sampleSize,
         signal,
+        pauseControl,
       );
       return {
         id: task.id,
@@ -204,6 +231,7 @@ export async function hashFileWorker(
         task.full_path,
         maxBytes,
         signal,
+        pauseControl,
       );
       const isFull = bytesRead >= task.file_size;
       return {
@@ -222,6 +250,7 @@ export async function hashFileWorker(
       task.full_path,
       undefined,
       signal,
+      pauseControl,
     );
     return {
       id: task.id,
@@ -329,6 +358,7 @@ async function executePerDriveTasks(
   phaseLabel: MultiDriveHashProgress['phase'],
   onProgress?: (progress: MultiDriveHashProgress) => void,
   signal?: AbortSignal,
+  pauseControl?: HashPauseControl,
 ): Promise<{ filesHashed: number; bytesHashed: number }> {
   if (tasks.length === 0) {
     return { filesHashed: 0, bytesHashed: 0 };
@@ -405,6 +435,7 @@ async function executePerDriveTasks(
     onProgress({
       strategy: config.hashStrategy,
       phase: phaseLabel,
+      paused: Boolean(pauseControl?.isPaused?.()),
       drives: { ...drivesProgress },
       totalFiles,
       completedFiles,
@@ -416,16 +447,38 @@ async function executePerDriveTasks(
 
   const driveEntries = Array.from(byDrive.entries());
   const startTimeByDrive: Record<string, number> = {};
+  const pausedMsByDrive: Record<string, number> = {};
 
   await Promise.all(
     driveEntries.map(async ([drive, driveTasks]) => {
       startTimeByDrive[drive] = performance.now();
+      pausedMsByDrive[drive] = 0;
+
+      const drivePauseControl: HashPauseControl | undefined = pauseControl
+        ? {
+            isPaused: pauseControl.isPaused,
+            waitIfPaused: async () => {
+              if (!pauseControl.waitIfPaused) return;
+              flushIfNeeded(true);
+              emitProgress();
+              const pauseStart = performance.now();
+              await pauseControl.waitIfPaused();
+              pausedMsByDrive[drive] += performance.now() - pauseStart;
+              emitProgress();
+            },
+          }
+        : undefined;
+
       for (const task of driveTasks) {
         if (signal?.aborted) break;
+        if (drivePauseControl?.isPaused?.() && drivePauseControl.waitIfPaused) {
+          await drivePauseControl.waitIfPaused();
+          if (signal?.aborted) break;
+        }
         drivesProgress[drive].currentFile = task.full_path;
         emitProgress();
 
-        const res = await hashFileWorker(task, signal);
+        const res = await hashFileWorker(task, signal, drivePauseControl);
         if (signal?.aborted && res.status === 'error_hashing') {
           break;
         }
@@ -438,7 +491,9 @@ async function executePerDriveTasks(
         const dp = drivesProgress[drive];
         dp.filesCompleted++;
         dp.bytesCompleted += res.bytesHashed;
-        const elapsedSec = Math.max(0.001, (performance.now() - startTimeByDrive[drive]) / 1000);
+        const activeMs =
+          performance.now() - startTimeByDrive[drive] - pausedMsByDrive[drive];
+        const elapsedSec = Math.max(0.001, activeMs / 1000);
         dp.speedBytesPerSec = dp.bytesCompleted / elapsedSec;
 
         flushIfNeeded(false);
@@ -514,12 +569,18 @@ export async function hashUnHashedFilesPerDrive(
     driveFilter?: string[];
     onProgress?: (progress: MultiDriveHashProgress) => void;
     signal?: AbortSignal;
+    isPaused?: () => boolean;
+    waitIfPaused?: () => Promise<void>;
   } = {},
 ): Promise<{
   totalFilesHashed: number;
   totalBytesHashed: number;
   candidateCollisionsHashed: number;
 }> {
+  const pauseControl: HashPauseControl | undefined =
+    options.isPaused || options.waitIfPaused
+      ? { isPaused: options.isPaused, waitIfPaused: options.waitIfPaused }
+      : undefined;
   const strategy = options.strategy ?? config.hashStrategy;
   const driveFilterSet = options.driveFilter
     ? new Set(options.driveFilter.map((d) => d.toUpperCase()))
@@ -562,6 +623,7 @@ export async function hashUnHashedFilesPerDrive(
       'full_library',
       options.onProgress,
       options.signal,
+      pauseControl,
     );
 
     return {
@@ -618,6 +680,7 @@ export async function hashUnHashedFilesPerDrive(
     'sparse_candidates',
     options.onProgress,
     options.signal,
+    pauseControl,
   );
 
   if (options.signal?.aborted) {
@@ -695,6 +758,7 @@ export async function hashUnHashedFilesPerDrive(
     'full_candidates',
     options.onProgress,
     options.signal,
+    pauseControl,
   );
 
   return {

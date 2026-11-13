@@ -12,6 +12,8 @@ const api = {
     ipcRenderer.invoke('pipeline:scan', options),
   runHash: (options?: { strategy?: 'smart_candidates' | 'full_library'; driveFilter?: string[] }) =>
     ipcRenderer.invoke('pipeline:hash', options),
+  pauseHash: () => ipcRenderer.invoke('pipeline:pause-hash'),
+  resumeHash: () => ipcRenderer.invoke('pipeline:resume-hash'),
   cancelHash: () => ipcRenderer.invoke('pipeline:cancel-hash'),
   syncTorrents: () => ipcRenderer.invoke('pipeline:sync-torrents'),
   findDuplicates: (options?: { forceRelink?: boolean }) =>

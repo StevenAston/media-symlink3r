@@ -27,6 +27,8 @@ declare global {
         strategy?: 'smart_candidates' | 'full_library';
         driveFilter?: string[];
       }): Promise<unknown>;
+      pauseHash(): Promise<boolean>;
+      resumeHash(): Promise<boolean>;
       cancelHash(): Promise<boolean>;
       syncTorrents(): Promise<unknown>;
       findDuplicates(options?: { forceRelink?: boolean }): Promise<unknown>;
@@ -109,6 +111,8 @@ export function App() {
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
   const [hashProgress, setHashProgress] = useState<MultiDriveHashProgress | null>(null);
+  const [isHashing, setIsHashing] = useState<boolean>(false);
+  const [isHashPaused, setIsHashPaused] = useState<boolean>(false);
 
   // Workbench state
   const [pendingPairs, setPendingPairs] = useState<PendingDuplicatePair[]>([]);
@@ -139,12 +143,14 @@ export function App() {
 
   const refreshCoreState = async () => {
     if (!window.mediaLinker) return;
-    const [cfg, st] = await Promise.all([
+    const [cfg, st, drives] = await Promise.all([
       window.mediaLinker.getConfig(),
       window.mediaLinker.getStatusCounts(),
+      window.mediaLinker.getDriveCatalogSummary(),
     ]);
     setConfig(cfg);
     setCounts(st);
+    setDriveSummaries(drives);
   };
 
   useEffect(() => {
@@ -194,7 +200,7 @@ export function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <h1>Media Symlinker v3</h1>
+          <h1>Symlink3r</h1>
           <p>DrivePool + qBittorrent Engine</p>
         </div>
 
@@ -202,7 +208,9 @@ export function App() {
           className={`nav-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
           onClick={() => setActiveTab('dashboard')}
         >
-          <span>Dashboard & Pipeline</span>
+          <span className="nav-item-left">
+            <span>Dashboard</span>
+          </span>
           <span className="badge blue">{counts.total.toLocaleString()}</span>
         </button>
 
@@ -218,7 +226,9 @@ export function App() {
             });
           }}
         >
-          <span>Dry-Run Workbench</span>
+          <span className="nav-item-left">
+            <span>Testbench</span>
+          </span>
           <span className="badge emerald">{counts.duplicate_found}</span>
         </button>
 
@@ -232,8 +242,10 @@ export function App() {
             });
           }}
         >
-          <span>1. Symlink Healer</span>
-          <span className="badge amber">P1</span>
+          <span className="nav-item-left">
+            <span className="p-circle amber">P1</span>
+            <span>Symlink Tools</span>
+          </span>
         </button>
 
         <button
@@ -246,8 +258,10 @@ export function App() {
             });
           }}
         >
-          <span>2. .bak Safety Vault</span>
-          <span className="badge emerald">P2</span>
+          <span className="nav-item-left">
+            <span className="p-circle emerald">P2</span>
+            <span>Backup Vault</span>
+          </span>
         </button>
 
         <button
@@ -260,16 +274,20 @@ export function App() {
             });
           }}
         >
-          <span>3. Orphaned Downloads</span>
-          <span className="badge blue">P3</span>
+          <span className="nav-item-left">
+            <span className="p-circle blue">P3</span>
+            <span>Orphaned Downloads</span>
+          </span>
         </button>
 
         <button
           className={`nav-btn ${activeTab === 'target_tester' ? 'active' : ''}`}
           onClick={() => setActiveTab('target_tester')}
         >
-          <span>4. Target Mode Tester</span>
-          <span className="badge blue">P4</span>
+          <span className="nav-item-left">
+            <span className="p-circle blue">P4</span>
+            <span>Targets</span>
+          </span>
         </button>
 
         <button
@@ -287,8 +305,10 @@ export function App() {
             });
           }}
         >
-          <span>5. Intra-Media & Catalog</span>
-          <span className="badge rose">P5</span>
+          <span className="nav-item-left">
+            <span className="p-circle rose">P5</span>
+            <span>Deduplicator</span>
+          </span>
         </button>
       </aside>
 
@@ -359,8 +379,15 @@ export function App() {
                   disabled={!!busyMessage}
                   onClick={() =>
                     void runAction('Hashing candidate files across drives...', async () => {
-                      await window.mediaLinker?.runHash({ strategy: 'smart_candidates' });
-                      setStatusBanner('Smart Candidate Hashing complete.');
+                      setIsHashing(true);
+                      setIsHashPaused(false);
+                      try {
+                        await window.mediaLinker?.runHash({ strategy: 'smart_candidates' });
+                        setStatusBanner('Smart Candidate Hashing complete.');
+                      } finally {
+                        setIsHashing(false);
+                        setIsHashPaused(false);
+                      }
                     })
                   }
                 >
@@ -372,8 +399,15 @@ export function App() {
                   disabled={!!busyMessage}
                   onClick={() =>
                     void runAction('Hashing entire library for disaster recovery...', async () => {
-                      await window.mediaLinker?.runHash({ strategy: 'full_library' });
-                      setStatusBanner('Full Library Disaster Recovery Hashing complete.');
+                      setIsHashing(true);
+                      setIsHashPaused(false);
+                      try {
+                        await window.mediaLinker?.runHash({ strategy: 'full_library' });
+                        setStatusBanner('Full Library Disaster Recovery Hashing complete.');
+                      } finally {
+                        setIsHashing(false);
+                        setIsHashPaused(false);
+                      }
                     })
                   }
                 >
@@ -416,53 +450,44 @@ export function App() {
                   4. Identify Duplicates
                 </button>
 
-                {busyMessage && (
-                  <button
-                    className="btn danger"
-                    onClick={() => void window.mediaLinker?.cancelHash()}
-                  >
-                    Stop Hashing
-                  </button>
+                {isHashing && (
+                  <>
+                    <button
+                      className={`btn ${isHashPaused ? 'success' : ''}`}
+                      onClick={() => {
+                        if (isHashPaused) {
+                          void window.mediaLinker?.resumeHash().then((ok) => {
+                            if (ok) {
+                              setIsHashPaused(false);
+                              setBusyMessage('Hashing resumed...');
+                            }
+                          });
+                        } else {
+                          void window.mediaLinker?.pauseHash().then((ok) => {
+                            if (ok) {
+                              setIsHashPaused(true);
+                              setBusyMessage('Hashing paused — click Resume Hashing to continue.');
+                            }
+                          });
+                        }
+                      }}
+                    >
+                      {isHashPaused ? 'Resume Hashing' : 'Pause Hashing'}
+                    </button>
+
+                    <button
+                      className="btn danger"
+                      onClick={() => {
+                        setIsHashPaused(false);
+                        void window.mediaLinker?.cancelHash();
+                      }}
+                    >
+                      Stop Hashing
+                    </button>
+                  </>
                 )}
               </div>
             </div>
-
-            {hashProgress && (
-              <div className="card">
-                <h3>
-                  Live Per-Drive Hashing Telemetry —{' '}
-                  {formatBytes(hashProgress.aggregateSpeedBytesPerSec)}/s
-                </h3>
-                <div className="drives-grid">
-                  {Object.values(hashProgress.drives).map((d) => {
-                    const pct =
-                      d.bytesTotal > 0
-                        ? Math.min(100, Math.round((d.bytesCompleted / d.bytesTotal) * 100))
-                        : 100;
-                    return (
-                      <div className="drive-card" key={d.drive}>
-                        <div className="drive-header">
-                          <span style={{ color: d.colorHsl }}>Drive {d.drive}:</span>
-                          <span>
-                            {d.filesCompleted}/{d.filesTotal} ({pct}%)
-                          </span>
-                        </div>
-                        <div className="progress-track">
-                          <div
-                            className="progress-fill"
-                            style={{ width: `${pct}%`, background: d.colorHsl }}
-                          />
-                        </div>
-                        <div className="mono" style={{ color: 'var(--text-secondary)' }}>
-                          {formatBytes(d.bytesCompleted)} / {formatBytes(d.bytesTotal)} •{' '}
-                          {formatBytes(d.speedBytesPerSec)}/s
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
           </>
         )}
 
@@ -1144,7 +1169,7 @@ export function App() {
                 {driveSummaries.map((d) => (
                   <div className="drive-card" key={d.drive}>
                     <div className="drive-header">
-                      <span style={{ color: d.colorHsl }}>Drive {d.drive}:</span>
+                      <span className="drive-letter">{d.drive.replace(':', '')}</span>
                       <span>{d.coveragePercent}% Hashed</span>
                     </div>
                     <div className="progress-track">
@@ -1193,6 +1218,70 @@ export function App() {
           </div>
         </div>
       </main>
+
+      <aside className="drives-panel">
+        <div className="drives-panel-header">
+          <span>Drives</span>
+          {isHashing && hashProgress && (
+            <span className="mono" style={{ color: 'var(--text-secondary)' }}>
+              {isHashPaused || hashProgress.paused
+                ? 'PAUSED'
+                : `${formatBytes(hashProgress.aggregateSpeedBytesPerSec)}/s`}
+            </span>
+          )}
+        </div>
+
+        <div className="drives-stack">
+          {isHashing && hashProgress
+            ? Object.values(hashProgress.drives).map((d) => {
+                const pct =
+                  d.bytesTotal > 0
+                    ? Math.min(100, Math.round((d.bytesCompleted / d.bytesTotal) * 100))
+                    : 100;
+                return (
+                  <div className="drive-card" key={d.drive}>
+                    <div className="drive-header">
+                      <span className="drive-letter">{d.drive.replace(':', '')}</span>
+                      <span className="mono" style={{ color: 'var(--text-secondary)' }}>
+                        {d.filesCompleted}/{d.filesTotal} ({pct}%)
+                      </span>
+                    </div>
+                    <div className="progress-track">
+                      <div
+                        className="progress-fill"
+                        style={{ width: `${pct}%`, background: d.colorHsl }}
+                      />
+                    </div>
+                    <div className="mono" style={{ color: 'var(--text-secondary)', fontSize: 11.5 }}>
+                      {formatBytes(d.bytesCompleted)} / {formatBytes(d.bytesTotal)} •{' '}
+                      {isHashPaused || hashProgress.paused
+                        ? 'Paused'
+                        : `${formatBytes(d.speedBytesPerSec)}/s`}
+                    </div>
+                  </div>
+                );
+              })
+            : driveSummaries.map((d) => (
+                <div className="drive-card" key={d.drive}>
+                  <div className="drive-header">
+                    <span className="drive-letter">{d.drive.replace(':', '')}</span>
+                    <span className="mono" style={{ color: 'var(--text-secondary)' }}>
+                      {d.coveragePercent}%
+                    </span>
+                  </div>
+                  <div className="progress-track">
+                    <div
+                      className="progress-fill"
+                      style={{ width: `${d.coveragePercent}%`, background: d.colorHsl }}
+                    />
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                    {d.totalFiles.toLocaleString()} files • {formatBytes(d.totalBytes)}
+                  </div>
+                </div>
+              ))}
+        </div>
+      </aside>
     </div>
   );
 }
