@@ -77,6 +77,9 @@ declare global {
         }) => void,
       ): () => void;
       onLogEntry(cb: (entry: LogEntry) => void): () => void;
+      minimizeWindow(): Promise<void>;
+      toggleMaximizeWindow(): Promise<boolean>;
+      closeWindow(): Promise<void>;
     };
   }
 }
@@ -334,6 +337,7 @@ export function App() {
 
   return (
     <div className="app-shell">
+      <div className="window-drag-strip" />
       <aside className="sidebar">
         <div className="brand">
           <h1>Symlink3r</h1>
@@ -1543,14 +1547,49 @@ export function App() {
 
       <aside className="drives-panel">
         <div className="drives-panel-header">
-          <span>Drives</span>
-          {isHashing && hashProgress && (
-            <span className="mono" style={{ color: 'var(--text-secondary)' }}>
-              {isHashPaused || hashProgress.paused
-                ? 'PAUSED'
-                : `${formatBytes(hashProgress.aggregateSpeedBytesPerSec)}/s`}
-            </span>
-          )}
+          <div className="drives-title-row">
+            <span>Drives</span>
+            {isHashing && hashProgress && (
+              <span className="mono" style={{ color: 'var(--text-secondary)', fontSize: 11.5 }}>
+                {isHashPaused || hashProgress.paused
+                  ? 'PAUSED'
+                  : `${formatBytes(hashProgress.aggregateSpeedBytesPerSec)}/s`}
+              </span>
+            )}
+          </div>
+          <div className="window-controls">
+            <button
+              className="win-btn"
+              onClick={() => void window.mediaLinker?.minimizeWindow()}
+              title="Minimize"
+              aria-label="Minimize window"
+            >
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+                <line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.4" />
+              </svg>
+            </button>
+            <button
+              className="win-btn"
+              onClick={() => void window.mediaLinker?.toggleMaximizeWindow()}
+              title="Maximize / Restore"
+              aria-label="Maximize or restore window"
+            >
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+                <rect x="2.2" y="2.2" width="7.6" height="7.6" rx="1" stroke="currentColor" strokeWidth="1.3" />
+              </svg>
+            </button>
+            <button
+              className="win-btn close"
+              onClick={() => void window.mediaLinker?.closeWindow()}
+              title="Close"
+              aria-label="Close window"
+            >
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+                <line x1="2.5" y1="2.5" x2="9.5" y2="9.5" stroke="currentColor" strokeWidth="1.4" />
+                <line x1="9.5" y1="2.5" x2="2.5" y2="9.5" stroke="currentColor" strokeWidth="1.4" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div className="drives-stack">

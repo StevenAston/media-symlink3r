@@ -89,6 +89,10 @@ const api = {
     ipcRenderer.on('log:entry', listener);
     return () => ipcRenderer.removeListener('log:entry', listener);
   },
+
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggle-maximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
 };
 
 contextBridge.exposeInMainWorld('mediaLinker', api);

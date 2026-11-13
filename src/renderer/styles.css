@@ -27,6 +27,24 @@ body {
   overflow-x: hidden;
 }
 
+.window-drag-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 120px;
+  height: 14px;
+  -webkit-app-region: drag;
+  z-index: 999;
+  pointer-events: none;
+}
+
+button,
+input,
+select,
+.window-controls {
+  -webkit-app-region: no-drag;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 260px 1fr 280px;
@@ -46,6 +64,7 @@ body {
   padding: 4px 10px 16px;
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 10px;
+  -webkit-app-region: drag;
 }
 
 .brand h1 {
@@ -346,13 +365,53 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 4px 4px 12px;
+  padding: 0 2px 12px;
   border-bottom: 1px solid var(--border-subtle);
   font-size: 13px;
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  -webkit-app-region: drag;
+}
+
+.drives-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  -webkit-app-region: no-drag;
+}
+
+.win-btn {
+  width: 28px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.win-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.win-btn.close:hover {
+  color: #ffffff;
+  border-color: var(--accent-rose);
+  background: rgba(225, 29, 72, 0.85);
 }
 
 .drives-stack {

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import {
@@ -81,13 +81,16 @@ function bootstrapDatabaseAndConfig(): void {
 }
 
 function createWindow(): void {
+  Menu.setApplicationMenu(null);
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 940,
     minWidth: 1100,
     minHeight: 720,
+    frame: false,
+    autoHideMenuBar: true,
     backgroundColor: '#0b0f19',
-    title: 'Media Symlinker v3',
+    title: 'Symlink3r',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -111,6 +114,24 @@ function createWindow(): void {
 }
 
 function registerIpcHandlers(): void {
+  ipcMain.handle('window:minimize', () => {
+    mainWindow?.minimize();
+  });
+
+  ipcMain.handle('window:toggle-maximize', () => {
+    if (!mainWindow) return false;
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize();
+      return false;
+    }
+    mainWindow.maximize();
+    return true;
+  });
+
+  ipcMain.handle('window:close', () => {
+    mainWindow?.close();
+  });
+
   ipcMain.handle('config:get', () => currentConfig);
 
   ipcMain.handle('config:update', (_e, partial: Partial<AppConfig>) => {
