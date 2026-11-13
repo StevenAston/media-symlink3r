@@ -1,13 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type {
   AppConfig,
   BakVaultItem,
   BrokenSymlinkReportItem,
   DriveRecoverySummary,
   IntraMediaDuplicateGroup,
+  LogEntry,
   MultiDriveHashProgress,
   OrphanedDownloadItem,
   PendingDuplicatePair,
+  ScanSummary,
   StatusCounts,
   SymlinkSandboxTestResult,
 } from '../core';
@@ -19,6 +21,7 @@ declare global {
       updateConfig(partial: Partial<AppConfig>): Promise<AppConfig>;
       discoverDrives(): Promise<Record<string, string>>;
       getStatusCounts(): Promise<StatusCounts>;
+      getRecentLogs(): Promise<LogEntry[]>;
       runScan(options?: { useEverythingSdk?: boolean; pruneMissing?: boolean }): Promise<unknown>;
       runHash(options?: {
         strategy?: 'smart_candidates' | 'full_library';
@@ -62,6 +65,14 @@ declare global {
       getDriveCatalogSummary(): Promise<DriveRecoverySummary[]>;
       exportDriveManifest(driveLetter: string, outputPath?: string): Promise<unknown>;
       onHashProgress(cb: (progress: MultiDriveHashProgress) => void): () => void;
+      onScanProgress(
+        cb: (progress: {
+          driveLetter: string;
+          source: 'media' | 'downloads';
+          summary: ScanSummary;
+        }) => void,
+      ): () => void;
+      onLogEntry(cb: (entry: LogEntry) => void): () => void;
     };
   }
 }
@@ -119,6 +130,10 @@ export function App() {
   const [intraGroups, setIntraGroups] = useState<IntraMediaDuplicateGroup[]>([]);
   const [driveSummaries, setDriveSummaries] = useState<DriveRecoverySummary[]>([]);
 
+  // Live logs & scan status
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const logContainerRef = useRef<HTMLDivElement | null>(null);
+
   const refreshCoreState = async () => {
     if (!window.mediaLinker) return;
     const [cfg, st] = await Promise.all([
@@ -132,11 +147,33 @@ export function App() {
   useEffect(() => {
     void refreshCoreState();
     if (!window.mediaLinker) return;
-    const unsub = window.mediaLinker.onHashProgress((prog) => {
+    void window.mediaLinker.getRecentLogs().then((initial) => setLogs(initial));
+
+    const unsubHash = window.mediaLinker.onHashProgress((prog) => {
       setHashProgress(prog);
     });
-    return unsub;
+    const unsubScan = window.mediaLinker.onScanProgress((prog) => {
+      setBusyMessage(
+        `Scanning Drive ${prog.driveLetter}: (${prog.source}) — ${prog.summary.upsertedCount.toLocaleString()} files indexed...`,
+      );
+      void window.mediaLinker?.getStatusCounts().then((st) => setCounts(st));
+    });
+    const unsubLog = window.mediaLinker.onLogEntry((entry) => {
+      setLogs((prev) => [...prev.slice(-399), entry]);
+    });
+
+    return () => {
+      unsubHash();
+      unsubScan();
+      unsubLog();
+    };
   }, []);
+
+  useEffect(() => {
+    if (logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
+  }, [logs]);
 
   const runAction = async (label: string, fn: () => Promise<void>) => {
     setBusyMessage(label);
@@ -956,6 +993,35 @@ export function App() {
             </div>
           </>
         )}
+
+        <div className="log-console">
+          <div className="log-console-header">
+            <span>
+              Live Activity Log ({config?.logFilePath ?? 'media_linker_v3.log'})
+            </span>
+            <button
+              className="btn"
+              style={{ padding: '3px 9px', fontSize: 11 }}
+              onClick={() => setLogs([])}
+            >
+              Clear View
+            </button>
+          </div>
+          <div className="log-entries" ref={logContainerRef}>
+            {logs.length === 0 ? (
+              <div style={{ color: '#64748b' }}>Ready. Waiting for actions...</div>
+            ) : (
+              logs.map((l) => (
+                <div className="log-line" key={l.id}>
+                  <span className="log-time">{l.timestamp}</span>
+                  <span className={`log-level ${l.level}`}>{l.level}</span>
+                  <span className="log-source">[{l.source}]</span>
+                  <span>{l.message}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       </main>
     </div>
   );

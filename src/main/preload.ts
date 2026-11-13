@@ -6,6 +6,7 @@ const api = {
     ipcRenderer.invoke('config:update', partial),
   discoverDrives: () => ipcRenderer.invoke('config:discover-drives'),
   getStatusCounts: () => ipcRenderer.invoke('db:status-counts'),
+  getRecentLogs: () => ipcRenderer.invoke('logs:recent'),
 
   runScan: (options?: { useEverythingSdk?: boolean; pruneMissing?: boolean }) =>
     ipcRenderer.invoke('pipeline:scan', options),
@@ -70,6 +71,18 @@ const api = {
     const listener = (_event: unknown, data: unknown) => callback(data);
     ipcRenderer.on('hash:progress', listener);
     return () => ipcRenderer.removeListener('hash:progress', listener);
+  },
+
+  onScanProgress: (callback: (progress: unknown) => void) => {
+    const listener = (_event: unknown, data: unknown) => callback(data);
+    ipcRenderer.on('scan:progress', listener);
+    return () => ipcRenderer.removeListener('scan:progress', listener);
+  },
+
+  onLogEntry: (callback: (entry: unknown) => void) => {
+    const listener = (_event: unknown, data: unknown) => callback(data);
+    ipcRenderer.on('log:entry', listener);
+    return () => ipcRenderer.removeListener('log:entry', listener);
   },
 };
 

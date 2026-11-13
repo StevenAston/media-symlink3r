@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AppConfig } from './config';
 import { withDatabase } from './database';
+import { logger } from './logger';
 import {
   extractPhysicalDriveLetter,
   normalizeWinPath,
@@ -45,6 +46,17 @@ export interface ScanSummary {
   totalPruned: number;
 }
 
+export interface DriveScanProgress {
+  driveLetter: string;
+  scanSource: 'media' | 'downloads';
+  folderIndex: number;
+  totalFolders: number;
+  searchPath: string;
+  status: 'scanning' | 'completed';
+  filesFound: number;
+  elapsedMs: number;
+}
+
 const EVERYTHING_REQUEST_FILE_NAME = 0x00000001;
 const EVERYTHING_REQUEST_PATH = 0x00000002;
 const EVERYTHING_REQUEST_SIZE = 0x00000010;
@@ -54,14 +66,33 @@ const FILE_ATTRIBUTE_REPARSE_POINT = 0x0400;
 const WINDOWS_TICK = 10000000n;
 const SEC_TO_UNIX_EPOCH = 116444736000000000n;
 
+function resolveReadlinkTarget(linkPath: string, rawTarget: string): string {
+  const cleaned = rawTarget.replace(/^\\\\\?\\/, '');
+  return path.win32.isAbsolute(cleaned)
+    ? normalizeWinPath(cleaned)
+    : normalizeWinPath(path.win32.resolve(path.win32.dirname(linkPath), cleaned));
+}
+
 /**
  * Safely inspects whether a path (or its virtual DrivePool counterpart) is a symlink and reads its target.
+ * Fast-paths NTFS reparse points so normal symlinks don't trigger redundant M:\ CoveFS lstat calls.
  */
 export function inspectSymlinkState(
   fullPath: string,
   virtualPathOrPoolRoot?: string | null,
   attrHint?: number,
 ): { isSymlink: boolean; target: string | null; symlinkTarget: string | null } {
+  // Fast path when Everything SDK already reported FILE_ATTRIBUTE_REPARSE_POINT
+  if (attrHint !== undefined && (attrHint & FILE_ATTRIBUTE_REPARSE_POINT) !== 0) {
+    try {
+      const raw = fs.readlinkSync(fullPath);
+      const target = resolveReadlinkTarget(fullPath, raw);
+      return { isSymlink: true, target, symlinkTarget: target };
+    } catch {
+      return { isSymlink: true, target: null, symlinkTarget: null };
+    }
+  }
+
   let virtualPath: string | null = null;
   if (virtualPathOrPoolRoot) {
     const derived = physicalToVirtualPath(fullPath, virtualPathOrPoolRoot);
@@ -73,28 +104,10 @@ export function inspectSymlinkState(
     if (lstat.isSymbolicLink()) {
       let target: string | null = null;
       try {
-        const raw = fs.readlinkSync(fullPath).replace(/^\\\\\?\\/, '');
-        target = path.win32.isAbsolute(raw)
-          ? normalizeWinPath(raw)
-          : normalizeWinPath(path.win32.resolve(path.win32.dirname(fullPath), raw));
+        const raw = fs.readlinkSync(fullPath);
+        target = resolveReadlinkTarget(fullPath, raw);
       } catch {
         target = null;
-      }
-
-      if (virtualPath && virtualPath !== fullPath) {
-        try {
-          const vStat = fs.lstatSync(virtualPath);
-          if (vStat.isSymbolicLink()) {
-            const vRaw = fs.readlinkSync(virtualPath).replace(/^\\\\\?\\/, '');
-            if (vRaw) {
-              target = path.win32.isAbsolute(vRaw)
-                ? normalizeWinPath(vRaw)
-                : normalizeWinPath(path.win32.resolve(path.win32.dirname(virtualPath), vRaw));
-            }
-          }
-        } catch {
-          // Ignore virtual readlink failure
-        }
       }
       return { isSymlink: true, target, symlinkTarget: target };
     }
@@ -104,10 +117,8 @@ export function inspectSymlinkState(
       try {
         const vStat = fs.lstatSync(virtualPath);
         if (vStat.isSymbolicLink()) {
-          const vRaw = fs.readlinkSync(virtualPath).replace(/^\\\\\?\\/, '');
-          const vTarget = path.win32.isAbsolute(vRaw)
-            ? normalizeWinPath(vRaw)
-            : normalizeWinPath(path.win32.resolve(path.win32.dirname(virtualPath), vRaw));
+          const vRaw = fs.readlinkSync(virtualPath);
+          const vTarget = resolveReadlinkTarget(virtualPath, vRaw);
           return { isSymlink: true, target: vTarget, symlinkTarget: vTarget };
         }
       } catch {
@@ -115,15 +126,14 @@ export function inspectSymlinkState(
       }
     }
   } catch {
-    if (attrHint !== undefined && (attrHint & FILE_ATTRIBUTE_REPARSE_POINT) !== 0) {
-      return { isSymlink: true, target: null, symlinkTarget: null };
-    }
+    // Ignore inaccessible file
   }
   return { isSymlink: false, target: null, symlinkTarget: null };
 }
 
 /**
  * Queries Everything64.dll via koffi FFI if available and Everything IPC is running.
+ * Automatically tries both default instance ("") and Everything 1.5a ("1.5a") if needed.
  */
 export function queryEverythingSdk(
   searchPath: string,
@@ -132,6 +142,7 @@ export function queryEverythingSdk(
 ): ScannedFileEntry[] | null {
   const dllCandidates = [
     'C:\\Program Files\\Everything\\Everything64.dll',
+    'C:\\Software\\Everything\\Everything64.dll',
     'C:\\Program Files (x86)\\Everything\\Everything32.dll',
   ];
   const dllPath = dllCandidates.find((p) => fs.existsSync(p));
@@ -142,11 +153,15 @@ export function queryEverythingSdk(
     const koffi = require('koffi');
     const lib = koffi.load(dllPath);
 
+    const Everything_SetInstanceNameW = lib.func(
+      'void __stdcall Everything_SetInstanceNameW(str16)',
+    );
     const Everything_SetSearchW = lib.func('void __stdcall Everything_SetSearchW(str16)');
     const Everything_SetRequestFlags = lib.func(
       'void __stdcall Everything_SetRequestFlags(uint32)',
     );
     const Everything_QueryW = lib.func('bool __stdcall Everything_QueryW(bool)');
+    const Everything_GetLastError = lib.func('uint32 __stdcall Everything_GetLastError()');
     const Everything_GetNumResults = lib.func('uint32 __stdcall Everything_GetNumResults()');
     const Everything_GetResultPathW = lib.func(
       'str16 __stdcall Everything_GetResultPathW(uint32)',
@@ -172,8 +187,6 @@ export function queryEverythingSdk(
       EVERYTHING_REQUEST_DATE_MODIFIED |
       EVERYTHING_REQUEST_ATTRIBUTES;
 
-    Everything_SetRequestFlags(flags);
-
     let searchQuery = `file: path:"${normalizedPath}"`;
     if (extensions && extensions.length > 0) {
       const cleaned = extensions
@@ -184,8 +197,25 @@ export function queryEverythingSdk(
       }
     }
 
+    Everything_SetInstanceNameW('');
+    Everything_SetRequestFlags(flags);
     Everything_SetSearchW(searchQuery);
-    if (!Everything_QueryW(true)) {
+
+    let ok: boolean = Everything_QueryW(true);
+    if (!ok && Everything_GetLastError() === 2) {
+      // Try Everything 1.5a named instance
+      Everything_SetInstanceNameW('1.5a');
+      Everything_SetRequestFlags(flags);
+      Everything_SetSearchW(searchQuery);
+      ok = Everything_QueryW(true);
+    }
+
+    if (!ok) {
+      const errCode = Everything_GetLastError();
+      logger.warn(
+        'EverythingSDK',
+        `Query failed for ${normalizedPath} (errorCode=${errCode}); falling back to native directory walk.`,
+      );
       return null;
     }
 
@@ -229,7 +259,8 @@ export function queryEverythingSdk(
     }
 
     return results;
-  } catch {
+  } catch (err) {
+    logger.warn('EverythingSDK', `Exception loading Everything64.dll: ${(err as Error).message}`);
     return null;
   }
 }
@@ -272,12 +303,11 @@ export function scanDirectoryNativeWalk(
       }
       const fullPath = path.join(currentDir, entry.name);
       try {
-        const lstat = fs.lstatSync(fullPath);
-        if (lstat.isDirectory() && !lstat.isSymbolicLink()) {
+        if (entry.isDirectory() && !entry.isSymbolicLink()) {
           stack.push(fullPath);
           continue;
         }
-        if (!lstat.isFile() && !lstat.isSymbolicLink()) {
+        if (!entry.isFile() && !entry.isSymbolicLink()) {
           continue;
         }
 
@@ -286,7 +316,21 @@ export function scanDirectoryNativeWalk(
           if (!allowedExts.has(ext)) continue;
         }
 
-        const { isSymlink, target } = inspectSymlinkState(fullPath, virtualPoolRoot);
+        const lstat = fs.lstatSync(fullPath);
+        let isSymlink = lstat.isSymbolicLink();
+        let target: string | null = null;
+
+        if (isSymlink) {
+          try {
+            target = resolveReadlinkTarget(fullPath, fs.readlinkSync(fullPath));
+          } catch {
+            target = null;
+          }
+        } else if (lstat.size === 0) {
+          const inspected = inspectSymlinkState(fullPath, virtualPoolRoot);
+          isSymlink = inspected.isSymlink;
+          target = inspected.target;
+        }
 
         results.push({
           full_path: fullPath,
@@ -306,10 +350,6 @@ export function scanDirectoryNativeWalk(
 
 /**
  * Scans a single directory and upserts matching files into SQLite.
- * Supports calling as:
- *   scanDirectory(config, searchPath, scanSource, options?)
- * or:
- *   scanDirectory(config, searchPath, scanSource, physicalDrive, options?)
  */
 export function scanDirectory(
   config: AppConfig,
@@ -318,6 +358,7 @@ export function scanDirectory(
   physicalDriveOrOptions?: string | ScanOptions,
   maybeOptions?: ScanOptions,
 ): ScanSummary {
+  const t0 = Date.now();
   const physicalDrive =
     typeof physicalDriveOrOptions === 'string'
       ? physicalDriveOrOptions
@@ -333,13 +374,24 @@ export function scanDirectory(
   const extensions = options.extensions ?? null;
   const pruneDeleted = options.pruneMissing ?? options.pruneDeleted ?? false;
 
+  logger.info(
+    'Scanner',
+    `Scanning [${physicalDrive}:/${scanSource}] ${searchPath} (${useEverythingSdk ? 'Everything SDK' : 'Native Walk'})...`,
+  );
+
   let rawEntries: Iterable<ScannedFileEntry>;
+  let usedMethod = 'Native Walk';
   if (options.iteratorOverride) {
     rawEntries = options.iteratorOverride(searchPath, extensions);
+    usedMethod = 'Custom Iterator';
   } else if (useEverythingSdk) {
     const sdkEntries = queryEverythingSdk(searchPath, extensions, config.virtualPoolRoot);
-    rawEntries =
-      sdkEntries ?? scanDirectoryNativeWalk(searchPath, extensions, config.virtualPoolRoot);
+    if (sdkEntries !== null) {
+      rawEntries = sdkEntries;
+      usedMethod = 'Everything SDK';
+    } else {
+      rawEntries = scanDirectoryNativeWalk(searchPath, extensions, config.virtualPoolRoot);
+    }
   } else {
     rawEntries = scanDirectoryNativeWalk(searchPath, extensions, config.virtualPoolRoot);
   }
@@ -482,6 +534,12 @@ export function scanDirectory(
     }
   });
 
+  const elapsedMs = Date.now() - t0;
+  logger.success(
+    'Scanner',
+    `Completed [${physicalDrive}:/${scanSource}] via ${usedMethod} in ${elapsedMs}ms — ${upsertedCount.toLocaleString()} indexed (${skippedBakCount} .bak skipped, ${prunedCount} pruned).`,
+  );
+
   const discovered = rowsToUpsert.length;
   return {
     scannedCount,
@@ -510,9 +568,16 @@ export function runFileScan(
     summary: ScanSummary,
   ) => void,
 ): ScanSummary {
+  const t0 = Date.now();
   const mediaSubfolder = path.win32.basename(normalizeWinPath(config.virtualMediaPath));
   const downloadsSubfolder = path.win32.basename(
     normalizeWinPath(config.virtualDownloadsPath),
+  );
+
+  const driveEntries = Object.entries(config.physicalDrivePaths);
+  logger.info(
+    'Scanner',
+    `Starting pool scan across ${driveEntries.length} physical drives (${driveEntries.map(([d]) => `${d}:`).join(', ')})...`,
   );
 
   let scannedCount = 0;
@@ -521,7 +586,7 @@ export function runFileScan(
   let skippedBakCount = 0;
   let prunedCount = 0;
 
-  for (const [driveLetter, poolPartPath] of Object.entries(config.physicalDrivePaths)) {
+  for (const [driveLetter, poolPartPath] of driveEntries) {
     const mediaFolder = path.win32.join(poolPartPath, mediaSubfolder);
     if (fs.existsSync(mediaFolder)) {
       const s = scanDirectory(config, mediaFolder, 'media', driveLetter, options);
@@ -550,6 +615,11 @@ export function runFileScan(
       onDriveProgress?.(driveLetter, 'downloads', s);
     }
   }
+
+  logger.success(
+    'Scanner',
+    `Full pool scan finished in ${((Date.now() - t0) / 1000).toFixed(2)}s — ${upsertedCount.toLocaleString()} total files indexed, ${prunedCount.toLocaleString()} dead entries pruned.`,
+  );
 
   return {
     scannedCount,

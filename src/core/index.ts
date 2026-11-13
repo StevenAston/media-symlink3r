@@ -1,5 +1,6 @@
 export * from './utils';
 export * from './config';
+export * from './logger';
 export * from './database';
 export * from './fileScanner';
 export * from './hashing';

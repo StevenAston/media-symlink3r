@@ -295,3 +295,72 @@ body {
   margin-bottom: 16px;
   color: var(--text-primary);
 }
+
+.log-console {
+  background: #060911;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 18px;
+}
+
+.log-console-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.log-entries {
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.log-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  line-height: 1.4;
+}
+
+.log-time {
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.log-level {
+  font-weight: 700;
+  flex-shrink: 0;
+  min-width: 58px;
+}
+
+.log-level.INFO {
+  color: var(--accent-blue);
+}
+
+.log-level.SUCCESS {
+  color: var(--accent-emerald);
+}
+
+.log-level.WARN {
+  color: var(--accent-amber);
+}
+
+.log-level.ERROR {
+  color: var(--accent-rose);
+}
+
+.log-source {
+  color: var(--accent-purple);
+  flex-shrink: 0;
+}
