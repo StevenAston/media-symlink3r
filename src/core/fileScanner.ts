@@ -141,6 +141,7 @@ export function queryEverythingSdk(
   virtualPoolRoot = 'M:\\',
 ): ScannedFileEntry[] | null {
   const dllCandidates = [
+    path.join(process.cwd(), 'Everything64.dll'),
     'C:\\Program Files\\Everything\\Everything64.dll',
     'C:\\Software\\Everything\\Everything64.dll',
     'C:\\Program Files (x86)\\Everything\\Everything32.dll',
