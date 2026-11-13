@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AppConfig,
   BakVaultItem,
   BrokenSymlinkReportItem,
   DriveRecoverySummary,
   IntraMediaDuplicateGroup,
+  LivePoolFilter,
   LogEntry,
   MultiDriveHashProgress,
   OrphanedDownloadItem,
@@ -20,12 +21,13 @@ declare global {
       getConfig(): Promise<AppConfig>;
       updateConfig(partial: Partial<AppConfig>): Promise<AppConfig>;
       discoverDrives(): Promise<Record<string, string>>;
-      getStatusCounts(): Promise<StatusCounts>;
+      getStatusCounts(filter?: LivePoolFilter): Promise<StatusCounts>;
       getRecentLogs(): Promise<LogEntry[]>;
       runScan(options?: { useEverythingSdk?: boolean; pruneMissing?: boolean }): Promise<unknown>;
       runHash(options?: {
         strategy?: 'smart_candidates' | 'full_library';
         driveFilter?: string[];
+        filter?: LivePoolFilter;
       }): Promise<unknown>;
       pauseHash(): Promise<boolean>;
       resumeHash(): Promise<boolean>;
@@ -96,6 +98,47 @@ function formatBytes(bytes: number): string {
   return `${val.toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
 }
 
+function parseSizeInputToBytes(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^(\d+(?:\.\d+)?)\s*(b|k|kb|kib|m|mb|mib|g|gb|gib|t|tb|tib)?$/i);
+  if (!match) return null;
+  const num = parseFloat(match[1]);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  const unit = (match[2] ?? 'm').toLowerCase();
+  const multipliers: Record<string, number> = {
+    b: 1,
+    k: 1024,
+    kb: 1024,
+    kib: 1024,
+    m: 1024 ** 2,
+    mb: 1024 ** 2,
+    mib: 1024 ** 2,
+    g: 1024 ** 3,
+    gb: 1024 ** 3,
+    gib: 1024 ** 3,
+    t: 1024 ** 4,
+    tb: 1024 ** 4,
+    tib: 1024 ** 4,
+  };
+  return Math.floor(num * (multipliers[unit] ?? 1024 ** 2));
+}
+
+const SYSTEM_LOG_SOURCES = new Set([
+  'System',
+  'Scanner',
+  'Config',
+  'qBittorrent',
+  'Healer',
+  'Vault',
+  'Orphans',
+  'TargetTester',
+  'IntraMedia',
+  'Catalog',
+]);
+
+const HASHING_LOG_SOURCES = new Set(['Hashing', 'Duplicates', 'Symlinker']);
+
 export function App() {
   const [activeTab, setActiveTab] = useState<TabId>('dashboard');
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -107,12 +150,44 @@ export function App() {
     duplicate_found: 0,
     symlinked: 0,
     error: 0,
+    totalBytes: 0,
+    newBytes: 0,
+    sparseHashedBytes: 0,
+    hashedBytes: 0,
+    duplicateFoundBytes: 0,
+    symlinkedBytes: 0,
+    errorBytes: 0,
   });
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
   const [hashProgress, setHashProgress] = useState<MultiDriveHashProgress | null>(null);
   const [isHashing, setIsHashing] = useState<boolean>(false);
   const [isHashPaused, setIsHashPaused] = useState<boolean>(false);
+
+  // Live pool filter bar state
+  const [filterMinSize, setFilterMinSize] = useState<string>('');
+  const [filterMaxSize, setFilterMaxSize] = useState<string>('');
+  const [filterAgeMode, setFilterAgeMode] = useState<'older' | 'newer'>('older');
+  const [filterAgeDays, setFilterAgeDays] = useState<string>('');
+  const [filterText, setFilterText] = useState<string>('');
+
+  const activePoolFilter: LivePoolFilter = useMemo(() => {
+    const parsedDays = parseFloat(filterAgeDays);
+    return {
+      minSizeBytes: parseSizeInputToBytes(filterMinSize),
+      maxSizeBytes: parseSizeInputToBytes(filterMaxSize),
+      ageMode: filterAgeMode,
+      ageDays: Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : null,
+      textQuery: filterText.trim() || null,
+    };
+  }, [filterMinSize, filterMaxSize, filterAgeMode, filterAgeDays, filterText]);
+
+  const activeFilterRef = useRef<LivePoolFilter>(activePoolFilter);
+  activeFilterRef.current = activePoolFilter;
+
+  const hasActivePoolFilter = Boolean(
+    filterMinSize.trim() || filterMaxSize.trim() || filterAgeDays.trim() || filterText.trim(),
+  );
 
   // Workbench state
   const [pendingPairs, setPendingPairs] = useState<PendingDuplicatePair[]>([]);
@@ -137,15 +212,65 @@ export function App() {
   const [intraGroups, setIntraGroups] = useState<IntraMediaDuplicateGroup[]>([]);
   const [driveSummaries, setDriveSummaries] = useState<DriveRecoverySummary[]>([]);
 
-  // Live logs & scan status
+  // Live logs, split panes & resize/collapse state
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const logContainerRef = useRef<HTMLDivElement | null>(null);
+  const [logOrientation, setLogOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
+  const [logSplitRatio, setLogSplitRatio] = useState<number>(50);
+  const [pane1Collapsed, setPane1Collapsed] = useState<boolean>(false);
+  const [pane2Collapsed, setPane2Collapsed] = useState<boolean>(false);
+  const logPanesContainerRef = useRef<HTMLDivElement | null>(null);
+  const logPane1Ref = useRef<HTMLDivElement | null>(null);
+  const logPane2Ref = useRef<HTMLDivElement | null>(null);
 
-  const refreshCoreState = async () => {
+  const systemLogs = useMemo(
+    () =>
+      logs.filter(
+        (l) => SYSTEM_LOG_SOURCES.has(l.source) || (!HASHING_LOG_SOURCES.has(l.source) && l.level !== 'ERROR' && l.level !== 'WARN'),
+      ),
+    [logs],
+  );
+
+  const hashingLogs = useMemo(
+    () =>
+      logs.filter(
+        (l) => HASHING_LOG_SOURCES.has(l.source) || l.level === 'ERROR' || l.level === 'WARN',
+      ),
+    [logs],
+  );
+
+  const handleStartLogResize = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const container = logPanesContainerRef.current;
+    if (!container) return;
+
+    setPane1Collapsed(false);
+    setPane2Collapsed(false);
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const pct =
+        logOrientation === 'horizontal'
+          ? ((moveEvent.clientX - rect.left) / rect.width) * 100
+          : ((moveEvent.clientY - rect.top) / rect.height) * 100;
+      setLogSplitRatio(Math.min(88, Math.max(12, Math.round(pct * 10) / 10)));
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
+  const refreshCoreState = async (filterOverride?: LivePoolFilter) => {
     if (!window.mediaLinker) return;
+    const effectiveFilter = filterOverride ?? activeFilterRef.current;
     const [cfg, st, drives] = await Promise.all([
       window.mediaLinker.getConfig(),
-      window.mediaLinker.getStatusCounts(),
+      window.mediaLinker.getStatusCounts(effectiveFilter),
       window.mediaLinker.getDriveCatalogSummary(),
     ]);
     setConfig(cfg);
@@ -165,7 +290,7 @@ export function App() {
       setBusyMessage(
         `Scanning Drive ${prog.driveLetter}: (${prog.source}) — ${prog.summary.upsertedCount.toLocaleString()} files indexed...`,
       );
-      void window.mediaLinker?.getStatusCounts().then((st) => setCounts(st));
+      void window.mediaLinker?.getStatusCounts(activeFilterRef.current).then((st) => setCounts(st));
     });
     const unsubLog = window.mediaLinker.onLogEntry((entry) => {
       setLogs((prev) => [...prev.slice(-399), entry]);
@@ -179,8 +304,19 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    if (!window.mediaLinker) return;
+    const timer = setTimeout(() => {
+      void window.mediaLinker?.getStatusCounts(activePoolFilter).then((st) => setCounts(st));
+    }, 120);
+    return () => clearTimeout(timer);
+  }, [activePoolFilter]);
+
+  useEffect(() => {
+    if (logPane1Ref.current) {
+      logPane1Ref.current.scrollTop = logPane1Ref.current.scrollHeight;
+    }
+    if (logPane2Ref.current) {
+      logPane2Ref.current.scrollTop = logPane2Ref.current.scrollHeight;
     }
   }, [logs]);
 
@@ -313,6 +449,81 @@ export function App() {
       </aside>
 
       <main className="main-content">
+        <div className="top-filter-bar">
+          <label className="filter-field">
+            <span>Min Size</span>
+            <input
+              type="text"
+              className="input-box"
+              style={{ width: 120 }}
+              placeholder="e.g. 50M, 1G"
+              value={filterMinSize}
+              onChange={(e) => setFilterMinSize(e.target.value)}
+            />
+          </label>
+
+          <label className="filter-field">
+            <span>Max Size</span>
+            <input
+              type="text"
+              className="input-box"
+              style={{ width: 120 }}
+              placeholder="e.g. 25G"
+              value={filterMaxSize}
+              onChange={(e) => setFilterMaxSize(e.target.value)}
+            />
+          </label>
+
+          <div className="filter-field">
+            <span>Modified</span>
+            <div className="filter-age-group">
+              <select
+                className="input-box"
+                value={filterAgeMode}
+                onChange={(e) => setFilterAgeMode(e.target.value as 'older' | 'newer')}
+              >
+                <option value="older">Older than</option>
+                <option value="newer">Newer than</option>
+              </select>
+              <input
+                type="number"
+                min={0}
+                className="input-box"
+                style={{ width: 76 }}
+                placeholder="Days"
+                value={filterAgeDays}
+                onChange={(e) => setFilterAgeDays(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <label className="filter-field filter-text-field">
+            <span>Live Pool Path Filter</span>
+            <input
+              type="search"
+              className="input-box"
+              placeholder="Filter live pool path, folder, or filename..."
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+            />
+          </label>
+
+          {hasActivePoolFilter && (
+            <button
+              className="btn"
+              onClick={() => {
+                setFilterMinSize('');
+                setFilterMaxSize('');
+                setFilterAgeMode('older');
+                setFilterAgeDays('');
+                setFilterText('');
+              }}
+            >
+              Reset
+            </button>
+          )}
+        </div>
+
         {busyMessage && <div className="banner">⏳ {busyMessage}</div>}
         {statusBanner && (
           <div className="banner" onClick={() => setStatusBanner(null)}>
@@ -324,32 +535,40 @@ export function App() {
           <div className="stat-card">
             <div className="label">Total Indexed</div>
             <div className="value">{counts.total.toLocaleString()}</div>
+            <div className="sub-value">{formatBytes(counts.totalBytes)}</div>
           </div>
           <div className="stat-card">
             <div className="label">New / Unhashed</div>
             <div className="value">{counts.new.toLocaleString()}</div>
+            <div className="sub-value">{formatBytes(counts.newBytes)}</div>
           </div>
           <div className="stat-card">
             <div className="label">Sparse Hashed</div>
             <div className="value">{counts.sparse_hashed.toLocaleString()}</div>
+            <div className="sub-value">{formatBytes(counts.sparseHashedBytes)}</div>
           </div>
           <div className="stat-card">
             <div className="label">Full xxh128 Hashed</div>
             <div className="value">{counts.hashed.toLocaleString()}</div>
+            <div className="sub-value">{formatBytes(counts.hashedBytes)}</div>
           </div>
           <div className="stat-card">
             <div className="label">Duplicates Ready</div>
             <div className="value" style={{ color: 'var(--accent-emerald)' }}>
               {counts.duplicate_found.toLocaleString()}
             </div>
+            <div className="sub-value">{formatBytes(counts.duplicateFoundBytes)}</div>
           </div>
           <div className="stat-card">
             <div className="label">Active Symlinks</div>
             <div className="value" style={{ color: 'var(--accent-blue)' }}>
               {counts.symlinked.toLocaleString()}
             </div>
+            <div className="sub-value">{formatBytes(counts.symlinkedBytes)}</div>
           </div>
         </div>
+
+        <div className="tab-scroll-area">
 
         {activeTab === 'dashboard' && (
           <>
@@ -382,7 +601,10 @@ export function App() {
                       setIsHashing(true);
                       setIsHashPaused(false);
                       try {
-                        await window.mediaLinker?.runHash({ strategy: 'smart_candidates' });
+                        await window.mediaLinker?.runHash({
+                          strategy: 'smart_candidates',
+                          filter: activePoolFilter,
+                        });
                         setStatusBanner('Smart Candidate Hashing complete.');
                       } finally {
                         setIsHashing(false);
@@ -402,7 +624,10 @@ export function App() {
                       setIsHashing(true);
                       setIsHashPaused(false);
                       try {
-                        await window.mediaLinker?.runHash({ strategy: 'full_library' });
+                        await window.mediaLinker?.runHash({
+                          strategy: 'full_library',
+                          filter: activePoolFilter,
+                        });
                         setStatusBanner('Full Library Disaster Recovery Hashing complete.');
                       } finally {
                         setIsHashing(false);
@@ -1189,32 +1414,129 @@ export function App() {
           </>
         )}
 
+        </div>
+
         <div className="log-console">
           <div className="log-console-header">
             <span>
               Live Activity Log ({config?.logFilePath ?? 'media_linker_v3.log'})
             </span>
-            <button
-              className="btn"
-              style={{ padding: '3px 9px', fontSize: 11 }}
-              onClick={() => setLogs([])}
-            >
-              Clear View
-            </button>
+            <div className="btn-row">
+              <button
+                className="btn"
+                style={{ padding: '3px 9px', fontSize: 11 }}
+                onClick={() =>
+                  setLogOrientation((o) => (o === 'horizontal' ? 'vertical' : 'horizontal'))
+                }
+                title="Flip split pane orientation between horizontal and vertical"
+              >
+                {logOrientation === 'horizontal' ? '⊟ Flip Vertical' : '◫ Flip Horizontal'}
+              </button>
+              <button
+                className="btn"
+                style={{ padding: '3px 9px', fontSize: 11 }}
+                onClick={() => setLogs([])}
+              >
+                Clear View
+              </button>
+            </div>
           </div>
-          <div className="log-entries" ref={logContainerRef}>
-            {logs.length === 0 ? (
-              <div style={{ color: '#64748b' }}>Ready. Waiting for actions...</div>
-            ) : (
-              logs.map((l) => (
-                <div className="log-line" key={l.id}>
-                  <span className="log-time">{l.timestamp}</span>
-                  <span className={`log-level ${l.level}`}>{l.level}</span>
-                  <span className="log-source">[{l.source}]</span>
-                  <span>{l.message}</span>
+
+          <div
+            ref={logPanesContainerRef}
+            className={`log-panes-container ${logOrientation}`}
+          >
+            <div
+              className={`log-pane ${pane1Collapsed ? 'collapsed' : ''}`}
+              style={
+                pane1Collapsed
+                  ? undefined
+                  : pane2Collapsed
+                    ? { flex: '1 1 0' }
+                    : { flex: `0 0 calc(${logSplitRatio}% - 4px)` }
+              }
+            >
+              <div className="log-pane-header">
+                {!pane1Collapsed && (
+                  <span>System &amp; Scanner ({systemLogs.length})</span>
+                )}
+                <button
+                  className="pane-collapse-btn"
+                  onClick={() => setPane1Collapsed((c) => !c)}
+                  title={pane1Collapsed ? 'Expand System & Scanner Log' : 'Collapse System & Scanner Log'}
+                >
+                  {pane1Collapsed
+                    ? logOrientation === 'horizontal'
+                      ? '▶'
+                      : '▼'
+                    : logOrientation === 'horizontal'
+                      ? '◀'
+                      : '▲'}
+                </button>
+              </div>
+              {!pane1Collapsed && (
+                <div className="log-entries" ref={logPane1Ref}>
+                  {systemLogs.length === 0 ? (
+                    <div style={{ color: '#64748b' }}>Ready. Waiting for system/scanner events...</div>
+                  ) : (
+                    systemLogs.map((l) => (
+                      <div className="log-line" key={l.id}>
+                        <span className="log-time">{l.timestamp}</span>
+                        <span className={`log-level ${l.level}`}>{l.level}</span>
+                        <span className="log-source">[{l.source}]</span>
+                        <span>{l.message}</span>
+                      </div>
+                    ))
+                  )}
                 </div>
-              ))
-            )}
+              )}
+            </div>
+
+            <div
+              className={`log-resizer ${logOrientation}`}
+              onMouseDown={handleStartLogResize}
+              title="Drag to resize activity log panes"
+            />
+
+            <div
+              className={`log-pane ${pane2Collapsed ? 'collapsed' : ''}`}
+              style={pane2Collapsed ? undefined : { flex: '1 1 0' }}
+            >
+              <div className="log-pane-header">
+                {!pane2Collapsed && (
+                  <span>Hashing, Warnings &amp; Errors ({hashingLogs.length})</span>
+                )}
+                <button
+                  className="pane-collapse-btn"
+                  onClick={() => setPane2Collapsed((c) => !c)}
+                  title={pane2Collapsed ? 'Expand Hashing & Warnings Log' : 'Collapse Hashing & Warnings Log'}
+                >
+                  {pane2Collapsed
+                    ? logOrientation === 'horizontal'
+                      ? '◀'
+                      : '▲'
+                    : logOrientation === 'horizontal'
+                      ? '▶'
+                      : '▼'}
+                </button>
+              </div>
+              {!pane2Collapsed && (
+                <div className="log-entries" ref={logPane2Ref}>
+                  {hashingLogs.length === 0 ? (
+                    <div style={{ color: '#64748b' }}>Ready. Waiting for hashing/warnings events...</div>
+                  ) : (
+                    hashingLogs.map((l) => (
+                      <div className="log-line" key={l.id}>
+                        <span className="log-time">{l.timestamp}</span>
+                        <span className={`log-level ${l.level}`}>{l.level}</span>
+                        <span className="log-source">[{l.source}]</span>
+                        <span>{l.message}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </main>

@@ -13,6 +13,7 @@ import {
   hashUnHashedFilesPerDrive,
   identifyAndLinkDuplicates,
   initializeDatabase,
+  LivePoolFilter,
   loadPersistedSettings,
   LogEntry,
   logger,
@@ -134,8 +135,8 @@ function registerIpcHandlers(): void {
     return currentConfig.physicalDrivePaths;
   });
 
-  ipcMain.handle('db:status-counts', () => {
-    return getStatusCounts(currentConfig.dbFilePath);
+  ipcMain.handle('db:status-counts', (_e, filter?: LivePoolFilter) => {
+    return getStatusCounts(currentConfig.dbFilePath, filter);
   });
 
   ipcMain.handle('logs:recent', () => {
@@ -153,7 +154,11 @@ function registerIpcHandlers(): void {
     'pipeline:hash',
     async (
       _e,
-      options?: { strategy?: 'smart_candidates' | 'full_library'; driveFilter?: string[] },
+      options?: {
+        strategy?: 'smart_candidates' | 'full_library';
+        driveFilter?: string[];
+        filter?: LivePoolFilter;
+      },
     ) => {
       const strategy = options?.strategy ?? currentConfig.hashStrategy;
       logger.info('Hashing', `Starting per-drive hashing (strategy=${strategy})...`);
@@ -164,6 +169,7 @@ function registerIpcHandlers(): void {
         const res = await hashUnHashedFilesPerDrive(currentConfig, {
           strategy,
           driveFilter: options?.driveFilter,
+          filter: options?.filter,
           signal: activeHashAbortController.signal,
           isPaused: () => isHashPaused,
           waitIfPaused: () =>

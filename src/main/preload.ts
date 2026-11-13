@@ -5,13 +5,16 @@ const api = {
   updateConfig: (partial: Record<string, unknown>) =>
     ipcRenderer.invoke('config:update', partial),
   discoverDrives: () => ipcRenderer.invoke('config:discover-drives'),
-  getStatusCounts: () => ipcRenderer.invoke('db:status-counts'),
+  getStatusCounts: (filter?: unknown) => ipcRenderer.invoke('db:status-counts', filter),
   getRecentLogs: () => ipcRenderer.invoke('logs:recent'),
 
   runScan: (options?: { useEverythingSdk?: boolean; pruneMissing?: boolean }) =>
     ipcRenderer.invoke('pipeline:scan', options),
-  runHash: (options?: { strategy?: 'smart_candidates' | 'full_library'; driveFilter?: string[] }) =>
-    ipcRenderer.invoke('pipeline:hash', options),
+  runHash: (options?: {
+    strategy?: 'smart_candidates' | 'full_library';
+    driveFilter?: string[];
+    filter?: unknown;
+  }) => ipcRenderer.invoke('pipeline:hash', options),
   pauseHash: () => ipcRenderer.invoke('pipeline:pause-hash'),
   resumeHash: () => ipcRenderer.invoke('pipeline:resume-hash'),
   cancelHash: () => ipcRenderer.invoke('pipeline:cancel-hash'),

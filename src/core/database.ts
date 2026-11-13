@@ -31,6 +31,14 @@ export interface FileRecord {
   error_message: string | null;
 }
 
+export interface LivePoolFilter {
+  minSizeBytes?: number | null;
+  maxSizeBytes?: number | null;
+  ageMode?: 'older' | 'newer';
+  ageDays?: number | null;
+  textQuery?: string | null;
+}
+
 export interface StatusCounts {
   total: number;
   new: number;
@@ -39,6 +47,13 @@ export interface StatusCounts {
   duplicate_found: number;
   symlinked: number;
   error: number;
+  totalBytes: number;
+  newBytes: number;
+  sparseHashedBytes: number;
+  hashedBytes: number;
+  duplicateFoundBytes: number;
+  symlinkedBytes: number;
+  errorBytes: number;
 }
 
 export function openDatabase(dbFilePath: string): DatabaseSync {
@@ -137,6 +152,7 @@ export function initializeDatabase(dbFilePath: string): void {
       CREATE INDEX IF NOT EXISTS idx_files_quick_hash ON files (quick_hash);
       CREATE INDEX IF NOT EXISTS idx_files_file_size ON files (file_size);
       CREATE INDEX IF NOT EXISTS idx_files_status_source ON files (scan_source, status, is_symlink);
+      CREATE INDEX IF NOT EXISTS idx_files_status_size ON files (status, file_size);
       CREATE INDEX IF NOT EXISTS idx_torrent_files_filepath ON torrent_files (filepath_in_torrent);
       CREATE INDEX IF NOT EXISTS idx_torrent_files_virtual_path ON torrent_files (virtual_path);
 
@@ -150,25 +166,126 @@ export function initializeDatabase(dbFilePath: string): void {
   });
 }
 
-export function getStatusCounts(dbFilePath: string): StatusCounts {
+export function buildLivePoolWhereClause(
+  filter?: LivePoolFilter,
+  tableAlias?: string,
+): { clauses: string[]; params: Array<string | number> } {
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+  if (!filter) {
+    return { clauses, params };
+  }
+
+  const prefix = tableAlias ? `${tableAlias}.` : '';
+
+  if (filter.minSizeBytes != null && filter.minSizeBytes > 0) {
+    clauses.push(`${prefix}file_size >= ?`);
+    params.push(filter.minSizeBytes);
+  }
+
+  if (filter.maxSizeBytes != null && filter.maxSizeBytes > 0) {
+    clauses.push(`${prefix}file_size <= ?`);
+    params.push(filter.maxSizeBytes);
+  }
+
+  if (filter.ageDays != null && filter.ageDays > 0) {
+    const cutoffSec = Math.floor(Date.now() / 1000) - filter.ageDays * 86400;
+    if (filter.ageMode === 'newer') {
+      clauses.push(`${prefix}modified_date >= ?`);
+      params.push(cutoffSec);
+    } else {
+      clauses.push(`${prefix}modified_date > 0 AND ${prefix}modified_date <= ?`);
+      params.push(cutoffSec);
+    }
+  }
+
+  if (filter.textQuery && filter.textQuery.trim().length > 0) {
+    clauses.push(`${prefix}full_path LIKE ?`);
+    params.push(`%${filter.textQuery.trim()}%`);
+  }
+
+  return { clauses, params };
+}
+
+export function getStatusCounts(
+  dbFilePath: string,
+  filter?: LivePoolFilter,
+): StatusCounts {
   return withDatabase(dbFilePath, (db) => {
-    const getCount = (whereClause?: string): number => {
-      const sql = whereClause
-        ? `SELECT COUNT(*) AS c FROM files WHERE ${whereClause}`
-        : `SELECT COUNT(*) AS c FROM files`;
-      const row = db.prepare(sql).get() as { c: number } | undefined;
-      return Number(row?.c ?? 0);
+    const { clauses, params } = buildLivePoolWhereClause(filter);
+    const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = db
+      .prepare(
+        `SELECT status, COUNT(*) AS c, COALESCE(SUM(file_size), 0) AS b
+         FROM files
+         ${whereSql}
+         GROUP BY status`,
+      )
+      .all(...params) as Array<{ status: string; c: number; b: number }>;
+
+    const counts: StatusCounts = {
+      total: 0,
+      new: 0,
+      sparse_hashed: 0,
+      hashed: 0,
+      duplicate_found: 0,
+      symlinked: 0,
+      error: 0,
+      totalBytes: 0,
+      newBytes: 0,
+      sparseHashedBytes: 0,
+      hashedBytes: 0,
+      duplicateFoundBytes: 0,
+      symlinkedBytes: 0,
+      errorBytes: 0,
     };
 
-    return {
-      total: getCount(),
-      new: getCount("status = 'new'"),
-      sparse_hashed: getCount("status = 'sparse_hashed'"),
-      hashed: getCount("status = 'hashed'"),
-      duplicate_found: getCount("status = 'duplicate_found'"),
-      symlinked: getCount("status IN ('symlinked', 'processed')"),
-      error: getCount("status LIKE 'error%'"),
-    };
+    for (const row of rows) {
+      const c = Number(row.c ?? 0);
+      const b = Number(row.b ?? 0);
+      counts.total += c;
+      counts.totalBytes += b;
+
+      if (row.status === 'new') {
+        counts.new += c;
+        counts.newBytes += b;
+      } else if (row.status === 'sparse_hashed') {
+        counts.sparse_hashed += c;
+        counts.sparseHashedBytes += b;
+      } else if (row.status === 'hashed') {
+        counts.hashed += c;
+        counts.hashedBytes += b;
+      } else if (row.status === 'duplicate_found') {
+        counts.duplicate_found += c;
+        counts.duplicateFoundBytes += b;
+      } else if (row.status === 'symlinked' || row.status === 'processed') {
+        counts.symlinked += c;
+        counts.symlinkedBytes += b;
+      } else if (row.status.startsWith('error')) {
+        counts.error += c;
+        counts.errorBytes += b;
+      }
+    }
+
+    if (counts.symlinked > 0 && counts.symlinkedBytes === 0) {
+      const { clauses: symClauses, params: symParams } = buildLivePoolWhereClause(filter, 's');
+      const symFilterAndSql = symClauses.length > 0 ? `AND ${symClauses.join(' AND ')}` : '';
+      const symRow = db
+        .prepare(
+          `SELECT COALESCE(SUM(COALESCE(m.file_size, v.file_size, p.file_size, s.file_size)), 0) AS sym_bytes
+           FROM files s
+           LEFT JOIN files m ON m.id = s.duplicate_of_id
+           LEFT JOIN files v ON v.virtual_path = s.symlink_target AND v.is_symlink = 0
+           LEFT JOIN files p ON p.full_path = s.symlink_target AND p.is_symlink = 0
+           WHERE s.status IN ('symlinked', 'processed') ${symFilterAndSql}`,
+        )
+        .get(...symParams) as { sym_bytes: number } | undefined;
+      const resolvedSymBytes = Number(symRow?.sym_bytes ?? 0);
+      counts.symlinkedBytes = resolvedSymBytes;
+      counts.totalBytes += resolvedSymBytes;
+    }
+
+    return counts;
   });
 }
 

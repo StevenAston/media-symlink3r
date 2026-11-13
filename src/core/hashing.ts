@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { createXXHash128 } from 'hash-wasm';
 import { AppConfig, HashStrategy } from './config';
-import { withDatabase } from './database';
+import { buildLivePoolWhereClause, LivePoolFilter, withDatabase } from './database';
 import { extractPhysicalDriveLetter, getHslColorForBar } from './utils';
 
 export type HashMode = 'full' | 'sparse' | 'quick';
@@ -567,6 +567,7 @@ export async function hashUnHashedFilesPerDrive(
   options: {
     strategy?: HashStrategy;
     driveFilter?: string[];
+    filter?: LivePoolFilter;
     onProgress?: (progress: MultiDriveHashProgress) => void;
     signal?: AbortSignal;
     isPaused?: () => boolean;
@@ -585,6 +586,17 @@ export async function hashUnHashedFilesPerDrive(
   const driveFilterSet = options.driveFilter
     ? new Set(options.driveFilter.map((d) => d.toUpperCase()))
     : null;
+  const { clauses: filterClauses, params: filterParams } = buildLivePoolWhereClause(
+    options.filter,
+  );
+  const filterAndSql =
+    filterClauses.length > 0 ? `AND ${filterClauses.join(' AND ')}` : '';
+  const { clauses: fFilterClauses, params: fFilterParams } = buildLivePoolWhereClause(
+    options.filter,
+    'f',
+  );
+  const fFilterAndSql =
+    fFilterClauses.length > 0 ? `AND ${fFilterClauses.join(' AND ')}` : '';
 
   if (strategy === 'full_library') {
     const tasks = withDatabase(config.dbFilePath, (db) => {
@@ -596,9 +608,10 @@ export async function hashUnHashedFilesPerDrive(
              AND file_size > 0
              AND xxh128_hash IS NULL
              AND status NOT LIKE 'error%'
+             ${filterAndSql}
            ORDER BY file_size DESC`,
         )
-        .all() as Array<{
+        .all(...filterParams) as Array<{
         id: number;
         full_path: string;
         file_size: number;
@@ -646,6 +659,7 @@ export async function hashUnHashedFilesPerDrive(
            AND sparse_hash IS NULL
            AND xxh128_hash IS NULL
            AND status NOT LIKE 'error%'
+           ${filterAndSql}
            AND file_size IN (
              SELECT file_size
              FROM files
@@ -655,7 +669,7 @@ export async function hashUnHashedFilesPerDrive(
            )
          ORDER BY file_size DESC`,
       )
-      .all() as Array<{
+      .all(...filterParams) as Array<{
       id: number;
       full_path: string;
       file_size: number;
@@ -711,9 +725,10 @@ export async function hashUnHashedFilesPerDrive(
            AND f.xxh128_hash IS NULL
            AND f.file_size <= 67108864
            AND f.status NOT LIKE 'error%'
+           ${fFilterAndSql}
          ORDER BY f.file_size DESC`,
       )
-      .all() as Array<{ id: number; physical_drive: string | null; full_path: string }>;
+      .all(...fFilterParams) as Array<{ id: number; physical_drive: string | null; full_path: string }>;
 
     return rows
       .filter((r) => {

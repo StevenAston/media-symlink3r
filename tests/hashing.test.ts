@@ -249,4 +249,42 @@ describe('hashing.ts', () => {
       expect(row.xxh128_hash).toBe(expected.hash);
     });
   });
+
+  it('filters the live pool of files to be hashed using LivePoolFilter', async () => {
+    const smallFile = path.join(poolPartD, 'Media', 'SmallClip.mkv');
+    const matchMovie = path.join(poolPartD, 'Media', 'TargetMovie.mkv');
+    const hugeSkip = path.join(poolPartD, 'Media', 'TooLarge.mkv');
+    const wrongName = path.join(poolPartD, 'Media', 'OtherMovie.mkv');
+
+    fs.writeFileSync(smallFile, Buffer.alloc(1000, 'A'));
+    fs.writeFileSync(matchMovie, Buffer.alloc(5000, 'B'));
+    fs.writeFileSync(hugeSkip, Buffer.alloc(9000, 'C'));
+    fs.writeFileSync(wrongName, Buffer.alloc(5000, 'D'));
+
+    runFileScan(config, { useEverythingSdk: false });
+
+    const res = await hashUnHashedFilesPerDrive(config, {
+      strategy: 'full_library',
+      filter: {
+        minSizeBytes: 2000,
+        maxSizeBytes: 8000,
+        textQuery: 'TargetMovie',
+      },
+    });
+
+    expect(res.totalFilesHashed).toBe(1);
+
+    withDatabase(config.dbFilePath, (db) => {
+      const rows = db
+        .prepare('SELECT filename, status, xxh128_hash FROM files ORDER BY filename ASC')
+        .all() as Array<{ filename: string; status: string; xxh128_hash: string | null }>;
+
+      const byName = new Map(rows.map((r) => [r.filename, r]));
+      expect(byName.get('TargetMovie.mkv')?.status).toBe('hashed');
+      expect(byName.get('TargetMovie.mkv')?.xxh128_hash).toBeTruthy();
+      expect(byName.get('SmallClip.mkv')?.status).toBe('new');
+      expect(byName.get('TooLarge.mkv')?.status).toBe('new');
+      expect(byName.get('OtherMovie.mkv')?.status).toBe('new');
+    });
+  });
 });
