@@ -4,6 +4,7 @@ import {
   discoverDrivePoolPaths,
   extractPhysicalDriveLetter,
   extractRelativePoolPath,
+  formatDisplayPoolPath,
   formatSize,
   getHslColorForBar,
   parseSize,
@@ -62,6 +63,14 @@ describe('utils.ts & config.ts', () => {
     expect(physicalToVirtualPath(phys, 'M:\\')).toBe(
       'M:\\Media\\Movies\\Film (2024)\\Film.mkv',
     );
+    expect(formatDisplayPoolPath(phys)).toBe(
+      'U:\\...\\Media\\Movies\\Film (2024)\\Film.mkv',
+    );
+    expect(
+      formatDisplayPoolPath(
+        'V:\\PoolPart.cd8bed16-b13c-4f35-967a-1abb245bc3eb\\Downloads\\Release\\Movie.mkv',
+      ),
+    ).toBe('V:\\...\\Downloads\\Release\\Movie.mkv');
     expect(extractPhysicalDriveLetter(phys)).toBe('U');
 
     const map = {

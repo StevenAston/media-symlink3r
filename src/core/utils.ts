@@ -112,6 +112,17 @@ export function normalizeWinPath(inputPath: string): string {
   return replaced.replace(/\\+$/, '');
 }
 
+export function formatDisplayPoolPath(inputPath: string): string {
+  const norm = normalizeWinPath(inputPath);
+  const sandboxMatch = norm.match(/\\Drive([A-Za-z])\\PoolPart\.[^\\]+(?:\\(.*))?$/i);
+  if (sandboxMatch) {
+    const drive = sandboxMatch[1].toUpperCase();
+    const rest = sandboxMatch[2] ? `\\${sandboxMatch[2]}` : '';
+    return `${drive}:\\...${rest}`;
+  }
+  return norm.replace(/\\PoolPart\.[^\\]+(?=\\|$)/gi, '\\...');
+}
+
 const POOLPART_CAPTURE_REGEX = /^(?:([A-Za-z]):\\(?:.*\\)?)?PoolPart\.[^\\]+\\(.*)$/i;
 
 /**

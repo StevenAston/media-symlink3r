@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import { createXXHash128 } from 'hash-wasm';
 import { AppConfig, HashStrategy } from './config';
 import { buildLivePoolWhereClause, LivePoolFilter, withDatabase } from './database';
-import { extractPhysicalDriveLetter, getHslColorForBar } from './utils';
+import { logger } from './logger';
+import { extractPhysicalDriveLetter, formatDisplayPoolPath, getHslColorForBar } from './utils';
 
 export type HashMode = 'full' | 'sparse' | 'quick';
 
@@ -374,6 +375,8 @@ async function executePerDriveTasks(
   signal?: AbortSignal,
   pauseControl?: HashPauseControl,
   baselineByDrive?: Record<string, DriveBaseline>,
+  loggedFilePaths: Set<string> = new Set<string>(),
+  workerLogIntervalMs: number = 5000,
 ): Promise<{ filesHashed: number; bytesHashed: number }> {
   const hasBaselineDrives = Boolean(baselineByDrive && Object.keys(baselineByDrive).length > 0);
   if (tasks.length === 0 && !hasBaselineDrives) {
@@ -498,83 +501,110 @@ async function executePerDriveTasks(
   const driveEntries = allDrives.map((d) => [d, byDrive.get(d) ?? []] as const);
   const startTimeByDrive: Record<string, number> = {};
   const pausedMsByDrive: Record<string, number> = {};
+  const lastWorkerLogTimeByDrive: Record<string, number> = {};
 
-  await Promise.all(
-    driveEntries.map(async ([drive, driveTasks]) => {
-      if (driveTasks.length === 0) return;
+  const maybeLogDriveCurrentFile = (drive: string, now: number = performance.now()) => {
+    if (signal?.aborted || pauseControl?.isPaused?.()) return;
+    const dp = drivesProgress[drive];
+    if (!dp || dp.phase === 'done' || !dp.currentFile) return;
+    const lastLog = lastWorkerLogTimeByDrive[drive] ?? 0;
+    if (lastLog > 0 && now - lastLog < workerLogIntervalMs) return;
+    const displayPath = formatDisplayPoolPath(dp.currentFile);
+    if (loggedFilePaths.has(displayPath)) return;
+    loggedFilePaths.add(displayPath);
+    lastWorkerLogTimeByDrive[drive] = now;
+    logger.info('Hashing', displayPath);
+  };
 
-      startTimeByDrive[drive] = performance.now();
-      pausedMsByDrive[drive] = 0;
+  const workerLogTimer = setInterval(() => {
+    const now = performance.now();
+    for (const drive of allDrives) {
+      maybeLogDriveCurrentFile(drive, now);
+    }
+  }, Math.max(10, workerLogIntervalMs));
+  workerLogTimer.unref?.();
 
-      const drivePauseControl: HashPauseControl | undefined = pauseControl
-        ? {
-            isPaused: pauseControl.isPaused,
-            waitIfPaused: async () => {
-              if (!pauseControl.waitIfPaused) return;
-              flushIfNeeded(true);
-              emitProgress();
-              const pauseStart = performance.now();
-              await pauseControl.waitIfPaused();
-              pausedMsByDrive[drive] += performance.now() - pauseStart;
-              emitProgress();
-            },
-          }
-        : undefined;
+  try {
+    await Promise.all(
+      driveEntries.map(async ([drive, driveTasks]) => {
+        if (driveTasks.length === 0) return;
 
-      for (const task of driveTasks) {
-        if (signal?.aborted) break;
-        if (drivePauseControl?.isPaused?.() && drivePauseControl.waitIfPaused) {
-          await drivePauseControl.waitIfPaused();
+        startTimeByDrive[drive] = performance.now();
+        pausedMsByDrive[drive] = 0;
+
+        const drivePauseControl: HashPauseControl | undefined = pauseControl
+          ? {
+              isPaused: pauseControl.isPaused,
+              waitIfPaused: async () => {
+                if (!pauseControl.waitIfPaused) return;
+                flushIfNeeded(true);
+                emitProgress();
+                const pauseStart = performance.now();
+                await pauseControl.waitIfPaused();
+                pausedMsByDrive[drive] += performance.now() - pauseStart;
+                emitProgress();
+              },
+            }
+          : undefined;
+
+        for (const task of driveTasks) {
           if (signal?.aborted) break;
-        }
-        drivesProgress[drive].currentFile = task.full_path;
-        emitProgress();
+          if (drivePauseControl?.isPaused?.() && drivePauseControl.waitIfPaused) {
+            await drivePauseControl.waitIfPaused();
+            if (signal?.aborted) break;
+          }
+          drivesProgress[drive].currentFile = task.full_path;
+          maybeLogDriveCurrentFile(drive);
+          emitProgress();
 
-        let inFlightBytes = 0;
-        const res = await hashFileWorker(task, signal, drivePauseControl, (chunkBytes) => {
-          inFlightBytes += chunkBytes;
-          sessionBytesByDrive[drive] += chunkBytes;
-          drivesProgress[drive].bytesCompleted += chunkBytes;
-          completedBytes += chunkBytes;
+          let inFlightBytes = 0;
+          const res = await hashFileWorker(task, signal, drivePauseControl, (chunkBytes) => {
+            inFlightBytes += chunkBytes;
+            sessionBytesByDrive[drive] += chunkBytes;
+            drivesProgress[drive].bytesCompleted += chunkBytes;
+            completedBytes += chunkBytes;
+            const activeMs =
+              performance.now() - startTimeByDrive[drive] - pausedMsByDrive[drive];
+            const elapsedSec = Math.max(0.001, activeMs / 1000);
+            drivesProgress[drive].speedBytesPerSec = sessionBytesByDrive[drive] / elapsedSec;
+            emitProgressThrottled();
+          });
+          if (signal?.aborted && res.status === 'error_hashing') {
+            drivesProgress[drive].bytesCompleted -= inFlightBytes;
+            sessionBytesByDrive[drive] -= inFlightBytes;
+            completedBytes -= inFlightBytes;
+            break;
+          }
+
+          const deltaBytes = res.bytesHashed - inFlightBytes;
+          const dp = drivesProgress[drive];
+          dp.bytesCompleted += deltaBytes;
+          sessionBytesByDrive[drive] += deltaBytes;
+          completedBytes += deltaBytes;
+
+          pendingBatch.push(res);
+          pendingBatchBytes += res.bytesHashed;
+          completedFiles++;
+          dp.filesCompleted++;
+          sessionFilesHashed++;
+          sessionBytesHashed += res.bytesHashed;
+
           const activeMs =
             performance.now() - startTimeByDrive[drive] - pausedMsByDrive[drive];
           const elapsedSec = Math.max(0.001, activeMs / 1000);
-          drivesProgress[drive].speedBytesPerSec = sessionBytesByDrive[drive] / elapsedSec;
-          emitProgressThrottled();
-        });
-        if (signal?.aborted && res.status === 'error_hashing') {
-          drivesProgress[drive].bytesCompleted -= inFlightBytes;
-          sessionBytesByDrive[drive] -= inFlightBytes;
-          completedBytes -= inFlightBytes;
-          break;
+          dp.speedBytesPerSec = sessionBytesByDrive[drive] / elapsedSec;
+
+          flushIfNeeded(false);
+          emitProgress();
         }
-
-        const deltaBytes = res.bytesHashed - inFlightBytes;
-        const dp = drivesProgress[drive];
-        dp.bytesCompleted += deltaBytes;
-        sessionBytesByDrive[drive] += deltaBytes;
-        completedBytes += deltaBytes;
-
-        pendingBatch.push(res);
-        pendingBatchBytes += res.bytesHashed;
-        completedFiles++;
-        dp.filesCompleted++;
-        sessionFilesHashed++;
-        sessionBytesHashed += res.bytesHashed;
-
-        const activeMs =
-          performance.now() - startTimeByDrive[drive] - pausedMsByDrive[drive];
-        const elapsedSec = Math.max(0.001, activeMs / 1000);
-        dp.speedBytesPerSec = sessionBytesByDrive[drive] / elapsedSec;
-
-        flushIfNeeded(false);
+        drivesProgress[drive].phase = 'done';
+        drivesProgress[drive].currentFile = '';
         emitProgress();
-      }
-      drivesProgress[drive].phase = 'done';
-      drivesProgress[drive].currentFile = '';
-      emitProgress();
-    }),
-  );
+      }),
+    );
+  } finally {
+    clearInterval(workerLogTimer);
+  }
 
   flushIfNeeded(true);
   return { filesHashed: sessionFilesHashed, bytesHashed: sessionBytesHashed };
@@ -643,12 +673,15 @@ export async function hashUnHashedFilesPerDrive(
     signal?: AbortSignal;
     isPaused?: () => boolean;
     waitIfPaused?: () => Promise<void>;
+    workerLogIntervalMs?: number;
   } = {},
 ): Promise<{
   totalFilesHashed: number;
   totalBytesHashed: number;
   candidateCollisionsHashed: number;
 }> {
+  const loggedFilePaths = new Set<string>();
+  const workerLogIntervalMs = options.workerLogIntervalMs ?? 5000;
   const pauseControl: HashPauseControl | undefined =
     options.isPaused || options.waitIfPaused
       ? { isPaused: options.isPaused, waitIfPaused: options.waitIfPaused }
@@ -739,6 +772,8 @@ export async function hashUnHashedFilesPerDrive(
       options.signal,
       pauseControl,
       baselineByDrive,
+      loggedFilePaths,
+      workerLogIntervalMs,
     );
 
     return {
@@ -797,6 +832,9 @@ export async function hashUnHashedFilesPerDrive(
     options.onProgress,
     options.signal,
     pauseControl,
+    undefined,
+    loggedFilePaths,
+    workerLogIntervalMs,
   );
 
   if (options.signal?.aborted) {
@@ -876,6 +914,9 @@ export async function hashUnHashedFilesPerDrive(
     options.onProgress,
     options.signal,
     pauseControl,
+    undefined,
+    loggedFilePaths,
+    workerLogIntervalMs,
   );
 
   return {

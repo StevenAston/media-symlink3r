@@ -101,6 +101,11 @@ function formatBytes(bytes: number): string {
   return `${val.toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
 }
 
+function formatDisplayPath(inputPath?: string | null): string {
+  if (!inputPath) return '';
+  return inputPath.replace(/\\PoolPart\.[^\\]+(?=\\|$)/gi, '\\...');
+}
+
 function parseSizeInputToBytes(raw: string): number | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -922,11 +927,13 @@ export function App() {
                             }}
                           />
                         </td>
-                        <td className="mono">{p.downloadFullPath}</td>
+                        <td className="mono">{formatDisplayPath(p.downloadFullPath)}</td>
                         <td className="mono">
-                          {config?.symlinkTargetMode === 'physical'
-                            ? p.proposedTargetPhysical
-                            : p.proposedTargetVirtual}
+                          {formatDisplayPath(
+                            config?.symlinkTargetMode === 'physical'
+                              ? p.proposedTargetPhysical
+                              : p.proposedTargetVirtual,
+                          )}
                         </td>
                         <td style={{ whiteSpace: 'nowrap' }}>{formatBytes(p.fileSize)}</td>
                         <td>
@@ -1040,7 +1047,7 @@ export function App() {
               <tbody>
                 {brokenSymlinks.map((b) => (
                   <tr key={b.symlinkPath}>
-                    <td className="mono">{b.symlinkPath}</td>
+                    <td className="mono">{formatDisplayPath(b.symlinkPath)}</td>
                     <td>
                       <span
                         className={`badge ${
@@ -1054,10 +1061,12 @@ export function App() {
                         {b.classification}
                       </span>
                     </td>
-                    <td className="mono">{b.currentTarget}</td>
+                    <td className="mono">{formatDisplayPath(b.currentTarget)}</td>
                     <td className="mono">
                       {b.proposedTargetVirtual ??
-                        b.proposedTargetPhysical ??
+                        (b.proposedTargetPhysical
+                          ? formatDisplayPath(b.proposedTargetPhysical)
+                          : null) ??
                         (b.hasBackupFile ? 'Restore .bak' : 'Unrecoverable')}
                     </td>
                   </tr>
@@ -1109,7 +1118,7 @@ export function App() {
               <tbody>
                 {bakItems.map((b) => (
                   <tr key={b.backupPath}>
-                    <td className="mono">{b.backupPath}</td>
+                    <td className="mono">{formatDisplayPath(b.backupPath)}</td>
                     <td>{formatBytes(b.fileSize)}</td>
                     <td>
                       {b.safeToDeleteBak ? (
@@ -1191,7 +1200,7 @@ export function App() {
               <tbody>
                 {orphanItems.map((o) => (
                   <tr key={o.fileId}>
-                    <td className="mono">{o.fullPath}</td>
+                    <td className="mono">{formatDisplayPath(o.fullPath)}</td>
                     <td>{formatBytes(o.fileSize)}</td>
                     <td>
                       {o.classification === 'already_in_media' ? (
@@ -1200,7 +1209,9 @@ export function App() {
                         <span className="badge amber">Unique to Downloads (Unimported)</span>
                       )}
                     </td>
-                    <td className="mono">{o.matchingMediaPath ?? '—'}</td>
+                    <td className="mono">
+                      {o.matchingMediaPath ? formatDisplayPath(o.matchingMediaPath) : '—'}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1339,7 +1350,7 @@ export function App() {
                       .map((f) => f.id);
                     return (
                       <tr key={g.xxh128Hash}>
-                        <td className="mono">{keepFile.fullPath}</td>
+                        <td className="mono">{formatDisplayPath(keepFile.fullPath)}</td>
                         <td>{g.copyCount - 1} extra copy/copies</td>
                         <td>{formatBytes(g.wastedBytes)}</td>
                         <td className="btn-row">

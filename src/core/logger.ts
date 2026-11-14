@@ -65,12 +65,13 @@ export function logMessage(
 ): LogEntry {
   const now = new Date();
   const timestamp = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+  const cleanMessage = message.replace(/\\PoolPart\.[^\\\s)'",]+(?=\\|\s|$|[)'",])/gi, '\\...');
   const entry: LogEntry = {
     id: nextLogId++,
     timestamp,
     level,
     source,
-    message,
+    message: cleanMessage,
   };
   emitLogEntry(entry);
   return entry;

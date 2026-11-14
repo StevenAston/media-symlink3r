@@ -12,6 +12,8 @@ import {
   hashSpecificFiles,
   hashUnHashedFilesPerDrive,
   initializeDatabase,
+  LogEntry,
+  onLogEntry,
   runFileScan,
   withDatabase,
   writeHashesToDb,
@@ -352,5 +354,43 @@ describe('hashing.ts', () => {
     expect(last.filesTotal).toBe(2);
     expect(last.bytesCompleted).toBe(firstBytes + secondBytes);
     expect(last.bytesTotal).toBe(firstBytes + secondBytes);
+  });
+
+  it('logs each worker active file with PoolPart stripped at most once per 5s interval', async () => {
+    const fileD1 = path.join(poolPartD, 'Media', 'WorkerD1.mkv');
+    const fileD2 = path.join(poolPartD, 'Media', 'WorkerD2.mkv');
+    const fileE1 = path.join(poolPartE, 'Downloads', 'WorkerE1.mkv');
+
+    fs.writeFileSync(fileD1, Buffer.alloc(16 * 1024, 'A'));
+    fs.writeFileSync(fileD2, Buffer.alloc(8 * 1024, 'B'));
+    fs.writeFileSync(fileE1, Buffer.alloc(16 * 1024, 'C'));
+
+    runFileScan(config, { useEverythingSdk: false });
+
+    const captured: LogEntry[] = [];
+    const unsubscribe = onLogEntry((entry) => {
+      if (entry.source === 'Hashing') {
+        captured.push(entry);
+      }
+    });
+
+    try {
+      const res = await hashUnHashedFilesPerDrive(config, {
+        strategy: 'full_library',
+        workerLogIntervalMs: 5000,
+      });
+      expect(res.totalFilesHashed).toBe(3);
+    } finally {
+      unsubscribe();
+    }
+
+    const messages = captured.map((e) => e.message);
+    expect(messages).toContain('D:\\...\\Media\\WorkerD1.mkv');
+    expect(messages).toContain('E:\\...\\Downloads\\WorkerE1.mkv');
+    expect(messages).not.toContain('D:\\...\\Media\\WorkerD2.mkv');
+    for (const msg of messages) {
+      expect(msg).not.toMatch(/PoolPart\./i);
+    }
+    expect(new Set(messages).size).toBe(messages.length);
   });
 });
