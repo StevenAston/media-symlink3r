@@ -58,9 +58,9 @@ export function createDefaultConfig(rootDir: string = process.cwd()): AppConfig 
     dbFilePath: path.join(rootDir, 'media_linker_v3.sqlite'),
     logFilePath: path.join(rootDir, 'media_linker_v3.log'),
     hashingWorkers: 10,
-    dbWriteThresholdGiB: 16,
-    dbWriteThresholdFiles: 256,
-    dbWriteThresholdSeconds: 60,
+    dbWriteThresholdGiB: 1,
+    dbWriteThresholdFiles: 16,
+    dbWriteThresholdSeconds: 5,
     sparseSampleSizeBytes: 1024 * 1024, // 1 MiB at head, mid, and tail
     quickHashRulesMiB: [
       { maxFileSizeMiB: 256, quickHashSizeMiB: 32 },

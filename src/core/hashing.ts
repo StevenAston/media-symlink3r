@@ -82,6 +82,7 @@ export async function computeStreamXxh128(
   maxBytesToRead?: number,
   signal?: AbortSignal,
   pauseControl?: HashPauseControl,
+  onChunkRead?: (chunkBytes: number) => void,
 ): Promise<{ hash: string; bytesRead: number }> {
   const hasher = await createXXHash128();
   hasher.init();
@@ -110,6 +111,7 @@ export async function computeStreamXxh128(
 
       hasher.update(buf.subarray(0, bytesRead));
       bytesReadTotal += bytesRead;
+      onChunkRead?.(bytesRead);
     }
   } finally {
     await fd.close();
@@ -131,6 +133,7 @@ export async function computeSparseHash(
   sampleSizeBytes: number = 1024 * 1024,
   signal?: AbortSignal,
   pauseControl?: HashPauseControl,
+  onChunkRead?: (chunkBytes: number) => void,
 ): Promise<{ sparseHash: string; fullHash?: string; bytesRead: number }> {
   if (fileSize <= sampleSizeBytes * 3) {
     const { hash, bytesRead } = await computeStreamXxh128(
@@ -138,6 +141,7 @@ export async function computeSparseHash(
       undefined,
       signal,
       pauseControl,
+      onChunkRead,
     );
     return {
       sparseHash: hash,
@@ -184,6 +188,7 @@ export async function computeSparseHash(
         );
         if (bytesRead <= 0) break;
         sliceRead += bytesRead;
+        onChunkRead?.(bytesRead);
       }
       hasher.update(buf.subarray(0, sliceRead));
       totalRead += sliceRead;
@@ -202,6 +207,7 @@ export async function hashFileWorker(
   task: HashTask,
   signal?: AbortSignal,
   pauseControl?: HashPauseControl,
+  onChunkRead?: (chunkBytes: number) => void,
 ): Promise<HashResult> {
   const start = performance.now();
   try {
@@ -213,6 +219,7 @@ export async function hashFileWorker(
         sampleSize,
         signal,
         pauseControl,
+        onChunkRead,
       );
       return {
         id: task.id,
@@ -232,6 +239,7 @@ export async function hashFileWorker(
         maxBytes,
         signal,
         pauseControl,
+        onChunkRead,
       );
       const isFull = bytesRead >= task.file_size;
       return {
@@ -251,6 +259,7 @@ export async function hashFileWorker(
       undefined,
       signal,
       pauseControl,
+      onChunkRead,
     );
     return {
       id: task.id,
@@ -348,6 +357,11 @@ export function writeHashesToDb(dbFilePath: string, results: HashResult[]): numb
   });
 }
 
+interface DriveBaseline {
+  filesCompleted: number;
+  bytesCompleted: number;
+}
+
 /**
  * Runs tasks grouped by physical drive concurrently across drives (1 sequential worker per drive)
  * with threshold-based SQLite batch flushing.
@@ -359,8 +373,10 @@ async function executePerDriveTasks(
   onProgress?: (progress: MultiDriveHashProgress) => void,
   signal?: AbortSignal,
   pauseControl?: HashPauseControl,
+  baselineByDrive?: Record<string, DriveBaseline>,
 ): Promise<{ filesHashed: number; bytesHashed: number }> {
-  if (tasks.length === 0) {
+  const hasBaselineDrives = Boolean(baselineByDrive && Object.keys(baselineByDrive).length > 0);
+  if (tasks.length === 0 && !hasBaselineDrives) {
     return { filesHashed: 0, bytesHashed: 0 };
   }
 
@@ -372,10 +388,23 @@ async function executePerDriveTasks(
     byDrive.set(d, arr);
   }
 
+  const allDrives = Array.from(
+    new Set([...byDrive.keys(), ...Object.keys(baselineByDrive ?? {})]),
+  ).sort((a, b) => a.localeCompare(b));
+
   const drivesProgress: Record<string, DriveHashProgress> = {};
+  const sessionBytesByDrive: Record<string, number> = {};
   let totalFiles = 0;
+  let completedFiles = 0;
   let totalBytes = 0;
-  for (const [drive, driveTasks] of byDrive.entries()) {
+  let completedBytes = 0;
+  let sessionFilesHashed = 0;
+  let sessionBytesHashed = 0;
+
+  for (const drive of allDrives) {
+    const driveTasks = byDrive.get(drive) ?? [];
+    const baseFiles = baselineByDrive?.[drive]?.filesCompleted ?? 0;
+    const baseBytes = baselineByDrive?.[drive]?.bytesCompleted ?? 0;
     const driveBytes = driveTasks.reduce(
       (acc, t) =>
         acc +
@@ -384,26 +413,33 @@ async function executePerDriveTasks(
           : t.file_size),
       0,
     );
-    totalFiles += driveTasks.length;
-    totalBytes += driveBytes;
+    totalFiles += baseFiles + driveTasks.length;
+    completedFiles += baseFiles;
+    totalBytes += baseBytes + driveBytes;
+    completedBytes += baseBytes;
+    sessionBytesByDrive[drive] = 0;
     drivesProgress[drive] = {
       drive,
       colorHsl: getHslColorForBar(drive),
-      filesTotal: driveTasks.length,
-      filesCompleted: 0,
-      bytesTotal: driveBytes,
-      bytesCompleted: 0,
+      filesTotal: baseFiles + driveTasks.length,
+      filesCompleted: baseFiles,
+      bytesTotal: baseBytes + driveBytes,
+      bytesCompleted: baseBytes,
       speedBytesPerSec: 0,
       currentFile: '',
-      phase: driveTasks[0]?.mode === 'sparse' ? 'sparse' : 'full',
+      phase:
+        driveTasks.length === 0
+          ? 'done'
+          : driveTasks[0]?.mode === 'sparse'
+            ? 'sparse'
+            : 'full',
     };
   }
 
-  let completedFiles = 0;
-  let completedBytes = 0;
   let pendingBatch: HashResult[] = [];
   let pendingBatchBytes = 0;
   let lastFlushTime = performance.now();
+  let lastEmitTime = 0;
 
   const thresholdBytes = config.dbWriteThresholdGiB * 1024 * 1024 * 1024;
   const thresholdFiles = config.dbWriteThresholdFiles;
@@ -428,15 +464,20 @@ async function executePerDriveTasks(
 
   const emitProgress = () => {
     if (!onProgress) return;
+    lastEmitTime = performance.now();
     const aggregateSpeed = Object.values(drivesProgress).reduce(
       (sum, d) => sum + d.speedBytesPerSec,
       0,
     );
+    const drivesSnapshot: Record<string, DriveHashProgress> = {};
+    for (const [key, val] of Object.entries(drivesProgress)) {
+      drivesSnapshot[key] = { ...val };
+    }
     onProgress({
       strategy: config.hashStrategy,
       phase: phaseLabel,
       paused: Boolean(pauseControl?.isPaused?.()),
-      drives: { ...drivesProgress },
+      drives: drivesSnapshot,
       totalFiles,
       completedFiles,
       totalBytes,
@@ -445,12 +486,23 @@ async function executePerDriveTasks(
     });
   };
 
-  const driveEntries = Array.from(byDrive.entries());
+  const emitProgressThrottled = () => {
+    if (!onProgress) return;
+    if (performance.now() - lastEmitTime >= 100) {
+      emitProgress();
+    }
+  };
+
+  emitProgress();
+
+  const driveEntries = allDrives.map((d) => [d, byDrive.get(d) ?? []] as const);
   const startTimeByDrive: Record<string, number> = {};
   const pausedMsByDrive: Record<string, number> = {};
 
   await Promise.all(
     driveEntries.map(async ([drive, driveTasks]) => {
+      if (driveTasks.length === 0) return;
+
       startTimeByDrive[drive] = performance.now();
       pausedMsByDrive[drive] = 0;
 
@@ -478,23 +530,42 @@ async function executePerDriveTasks(
         drivesProgress[drive].currentFile = task.full_path;
         emitProgress();
 
-        const res = await hashFileWorker(task, signal, drivePauseControl);
+        let inFlightBytes = 0;
+        const res = await hashFileWorker(task, signal, drivePauseControl, (chunkBytes) => {
+          inFlightBytes += chunkBytes;
+          sessionBytesByDrive[drive] += chunkBytes;
+          drivesProgress[drive].bytesCompleted += chunkBytes;
+          completedBytes += chunkBytes;
+          const activeMs =
+            performance.now() - startTimeByDrive[drive] - pausedMsByDrive[drive];
+          const elapsedSec = Math.max(0.001, activeMs / 1000);
+          drivesProgress[drive].speedBytesPerSec = sessionBytesByDrive[drive] / elapsedSec;
+          emitProgressThrottled();
+        });
         if (signal?.aborted && res.status === 'error_hashing') {
+          drivesProgress[drive].bytesCompleted -= inFlightBytes;
+          sessionBytesByDrive[drive] -= inFlightBytes;
+          completedBytes -= inFlightBytes;
           break;
         }
+
+        const deltaBytes = res.bytesHashed - inFlightBytes;
+        const dp = drivesProgress[drive];
+        dp.bytesCompleted += deltaBytes;
+        sessionBytesByDrive[drive] += deltaBytes;
+        completedBytes += deltaBytes;
 
         pendingBatch.push(res);
         pendingBatchBytes += res.bytesHashed;
         completedFiles++;
-        completedBytes += res.bytesHashed;
-
-        const dp = drivesProgress[drive];
         dp.filesCompleted++;
-        dp.bytesCompleted += res.bytesHashed;
+        sessionFilesHashed++;
+        sessionBytesHashed += res.bytesHashed;
+
         const activeMs =
           performance.now() - startTimeByDrive[drive] - pausedMsByDrive[drive];
         const elapsedSec = Math.max(0.001, activeMs / 1000);
-        dp.speedBytesPerSec = dp.bytesCompleted / elapsedSec;
+        dp.speedBytesPerSec = sessionBytesByDrive[drive] / elapsedSec;
 
         flushIfNeeded(false);
         emitProgress();
@@ -506,7 +577,7 @@ async function executePerDriveTasks(
   );
 
   flushIfNeeded(true);
-  return { filesHashed: completedFiles, bytesHashed: completedBytes };
+  return { filesHashed: sessionFilesHashed, bytesHashed: sessionBytesHashed };
 }
 
 /**
@@ -599,7 +670,35 @@ export async function hashUnHashedFilesPerDrive(
     fFilterClauses.length > 0 ? `AND ${fFilterClauses.join(' AND ')}` : '';
 
   if (strategy === 'full_library') {
-    const tasks = withDatabase(config.dbFilePath, (db) => {
+    const { tasks, baselineByDrive } = withDatabase(config.dbFilePath, (db) => {
+      const baselineRows = db
+        .prepare(
+          `SELECT
+             COALESCE(physical_drive, 'OTHER') AS drive,
+             COUNT(*) AS hashedFiles,
+             COALESCE(SUM(file_size), 0) AS hashedBytes
+           FROM files
+           WHERE is_symlink = 0
+             AND file_size > 0
+             AND xxh128_hash IS NOT NULL
+             ${filterAndSql}
+           GROUP BY COALESCE(physical_drive, 'OTHER')`,
+        )
+        .all(...filterParams) as Array<{
+        drive: string;
+        hashedFiles: number;
+        hashedBytes: number;
+      }>;
+
+      const baselines: Record<string, DriveBaseline> = {};
+      for (const row of baselineRows) {
+        if (driveFilterSet && !driveFilterSet.has(row.drive.toUpperCase())) continue;
+        baselines[row.drive] = {
+          filesCompleted: Number(row.hashedFiles ?? 0),
+          bytesCompleted: Number(row.hashedBytes ?? 0),
+        };
+      }
+
       const rows = db
         .prepare(
           `SELECT id, full_path, file_size, physical_drive
@@ -618,7 +717,7 @@ export async function hashUnHashedFilesPerDrive(
         physical_drive: string | null;
       }>;
 
-      return rows
+      const unhashedTasks = rows
         .map((r): HashTask => ({
           id: r.id,
           full_path: r.full_path,
@@ -628,6 +727,8 @@ export async function hashUnHashedFilesPerDrive(
           sparseSampleSizeBytes: config.sparseSampleSizeBytes,
         }))
         .filter((t) => !driveFilterSet || driveFilterSet.has(t.physical_drive.toUpperCase()));
+
+      return { tasks: unhashedTasks, baselineByDrive: baselines };
     });
 
     const { filesHashed, bytesHashed } = await executePerDriveTasks(
@@ -637,6 +738,7 @@ export async function hashUnHashedFilesPerDrive(
       options.onProgress,
       options.signal,
       pauseControl,
+      baselineByDrive,
     );
 
     return {

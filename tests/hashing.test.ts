@@ -287,4 +287,70 @@ describe('hashing.ts', () => {
       expect(byName.get('OtherMovie.mkv')?.status).toBe('new');
     });
   });
+
+  it('preserves already-hashed per-drive baseline in full_library progress and streams chunk progress', async () => {
+    const file1 = path.join(poolPartD, 'Media', 'AlreadyHashed.mkv');
+    const file2 = path.join(poolPartD, 'Media', 'RemainingLarge.mkv');
+    const firstBytes = 64 * 1024;
+    const secondBytes = 640 * 1024; // > 256 KiB so multiple stream chunks are read
+
+    fs.writeFileSync(file1, Buffer.alloc(firstBytes, '1'));
+    fs.writeFileSync(file2, Buffer.alloc(secondBytes, '2'));
+    runFileScan(config, { useEverythingSdk: false });
+
+    const chunkSizes: number[] = [];
+    const { hash: file1Hash } = await computeStreamXxh128(
+      file1,
+      undefined,
+      undefined,
+      undefined,
+      (delta) => chunkSizes.push(delta),
+    );
+    expect(chunkSizes).toEqual([firstBytes]);
+    withDatabase(config.dbFilePath, (db) => {
+      db.prepare("UPDATE files SET xxh128_hash = ?, status = 'hashed' WHERE filename = ?").run(
+        file1Hash,
+        'AlreadyHashed.mkv',
+      );
+    });
+
+    const events: Array<{
+      filesCompleted: number;
+      filesTotal: number;
+      bytesCompleted: number;
+      bytesTotal: number;
+    }> = [];
+
+    const res = await hashUnHashedFilesPerDrive(config, {
+      strategy: 'full_library',
+      onProgress: (prog) => {
+        const d = prog.drives['D'];
+        if (d) {
+          events.push({
+            filesCompleted: d.filesCompleted,
+            filesTotal: d.filesTotal,
+            bytesCompleted: d.bytesCompleted,
+            bytesTotal: d.bytesTotal,
+          });
+        }
+      },
+    });
+
+    expect(res.totalFilesHashed).toBe(1);
+    expect(res.totalBytesHashed).toBe(secondBytes);
+    expect(events.length).toBeGreaterThanOrEqual(2);
+
+    // First emitted snapshot must preserve the already-hashed file baseline (never reset to 0)
+    expect(events[0].filesCompleted).toBe(1);
+    expect(events[0].filesTotal).toBe(2);
+    expect(events[0].bytesCompleted).toBe(firstBytes);
+    expect(events[0].bytesTotal).toBe(firstBytes + secondBytes);
+
+    // Final snapshot completes at 2/2 and 100% of drive bytes
+    const last = events[events.length - 1];
+    expect(last.filesCompleted).toBe(2);
+    expect(last.filesTotal).toBe(2);
+    expect(last.bytesCompleted).toBe(firstBytes + secondBytes);
+    expect(last.bytesTotal).toBe(firstBytes + secondBytes);
+  });
 });

@@ -286,8 +286,16 @@ export function App() {
     if (!window.mediaLinker) return;
     void window.mediaLinker.getRecentLogs().then((initial) => setLogs(initial));
 
+    let lastCountsRefreshMs = 0;
     const unsubHash = window.mediaLinker.onHashProgress((prog) => {
       setHashProgress(prog);
+      const now = Date.now();
+      if (now - lastCountsRefreshMs >= 2500) {
+        lastCountsRefreshMs = now;
+        void window.mediaLinker
+          ?.getStatusCounts(activeFilterRef.current)
+          .then((st) => setCounts(st));
+      }
     });
     const unsubScan = window.mediaLinker.onScanProgress((prog) => {
       setBusyMessage(
@@ -1604,7 +1612,7 @@ export function App() {
                     <div className="drive-header">
                       <span className="drive-letter">{d.drive.replace(':', '')}</span>
                       <span className="mono" style={{ color: 'var(--text-secondary)' }}>
-                        {d.filesCompleted}/{d.filesTotal} ({pct}%)
+                        {d.filesCompleted.toLocaleString()}/{d.filesTotal.toLocaleString()} ({pct}%)
                       </span>
                     </div>
                     <div className="progress-track">
@@ -1622,25 +1630,28 @@ export function App() {
                   </div>
                 );
               })
-            : driveSummaries.map((d) => (
-                <div className="drive-card" key={d.drive}>
-                  <div className="drive-header">
-                    <span className="drive-letter">{d.drive.replace(':', '')}</span>
-                    <span className="mono" style={{ color: 'var(--text-secondary)' }}>
-                      {d.coveragePercent}%
-                    </span>
+            : driveSummaries.map((d) => {
+                const pct = Math.min(100, Math.round(d.coveragePercent));
+                return (
+                  <div className="drive-card" key={d.drive}>
+                    <div className="drive-header">
+                      <span className="drive-letter">{d.drive.replace(':', '')}</span>
+                      <span className="mono" style={{ color: 'var(--text-secondary)' }}>
+                        {d.hashedFiles.toLocaleString()}/{d.totalFiles.toLocaleString()} ({pct}%)
+                      </span>
+                    </div>
+                    <div className="progress-track">
+                      <div
+                        className="progress-fill"
+                        style={{ width: `${pct}%`, background: d.colorHsl }}
+                      />
+                    </div>
+                    <div className="mono" style={{ color: 'var(--text-secondary)', fontSize: 11.5 }}>
+                      {formatBytes(d.hashedBytes)} / {formatBytes(d.totalBytes)}
+                    </div>
                   </div>
-                  <div className="progress-track">
-                    <div
-                      className="progress-fill"
-                      style={{ width: `${d.coveragePercent}%`, background: d.colorHsl }}
-                    />
-                  </div>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>
-                    {d.totalFiles.toLocaleString()} files • {formatBytes(d.totalBytes)}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
         </div>
       </aside>
     </div>
